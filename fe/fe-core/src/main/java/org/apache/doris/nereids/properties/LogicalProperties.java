@@ -19,27 +19,30 @@ package org.apache.doris.nereids.properties;
 
 import org.apache.doris.common.Id;
 import org.apache.doris.nereids.trees.expressions.ExprId;
-import org.apache.doris.nereids.trees.expressions.NamedExpression;
 import org.apache.doris.nereids.trees.expressions.Slot;
 
 import com.google.common.base.Supplier;
 import com.google.common.base.Suppliers;
+import com.google.common.collect.ImmutableList;
+import com.google.common.collect.ImmutableMap;
+import com.google.common.collect.ImmutableSet;
 
-import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
-import java.util.stream.Collectors;
 
 /**
  * Logical properties used for analysis and optimize in Nereids.
  */
 public class LogicalProperties {
     protected final Supplier<List<Slot>> outputSupplier;
-    protected final Supplier<HashSet<ExprId>> outputSetSupplier;
+    protected final Supplier<List<Id>> outputExprIdsSupplier;
+    protected final Supplier<Set<Slot>> outputSetSupplier;
+    protected final Supplier<Map<Slot, Slot>> outputMapSupplier;
+    protected final Supplier<Set<ExprId>> outputExprIdSetSupplier;
+    protected final Supplier<DataTrait> dataTraitSupplier;
     private Integer hashCode = null;
-    private Set<ExprId> outputExprIdSet;
-    private List<Id> outputExprIds;
 
     /**
      * constructor of LogicalProperties.
@@ -47,13 +50,47 @@ public class LogicalProperties {
      * @param outputSupplier provide the output. Supplier can lazy compute output without
      *                       throw exception for which children have UnboundRelation
      */
-    public LogicalProperties(Supplier<List<Slot>> outputSupplier) {
+    public LogicalProperties(Supplier<List<Slot>> outputSupplier,
+            Supplier<DataTrait> dataTraitSupplier) {
         this.outputSupplier = Suppliers.memoize(
                 Objects.requireNonNull(outputSupplier, "outputSupplier can not be null")
         );
-        this.outputSetSupplier = Suppliers.memoize(
-                () -> outputSupplier.get().stream().map(NamedExpression::getExprId)
-                        .collect(Collectors.toCollection(HashSet::new))
+        this.outputExprIdsSupplier = Suppliers.memoize(() -> {
+            List<Slot> output = this.outputSupplier.get();
+            ImmutableList.Builder<Id> exprIdSet
+                    = ImmutableList.builderWithExpectedSize(output.size());
+            for (Slot slot : output) {
+                exprIdSet.add(slot.getExprId());
+            }
+            return exprIdSet.build();
+        });
+        this.outputSetSupplier = Suppliers.memoize(() -> {
+            List<Slot> output = outputSupplier.get();
+            ImmutableSet.Builder<Slot> slots = ImmutableSet.builderWithExpectedSize(output.size());
+            for (Slot slot : output) {
+                slots.add(slot);
+            }
+            return slots.build();
+        });
+        this.outputMapSupplier = Suppliers.memoize(() -> {
+            Set<Slot> slots = outputSetSupplier.get();
+            ImmutableMap.Builder<Slot, Slot> map = ImmutableMap.builderWithExpectedSize(slots.size());
+            for (Slot slot : slots) {
+                map.put(slot, slot);
+            }
+            return map.build();
+        });
+        this.outputExprIdSetSupplier = Suppliers.memoize(() -> {
+            List<Slot> output = this.outputSupplier.get();
+            ImmutableSet.Builder<ExprId> exprIdSet
+                    = ImmutableSet.builderWithExpectedSize(output.size());
+            for (Slot slot : output) {
+                exprIdSet.add(slot.getExprId());
+            }
+            return exprIdSet.build();
+        });
+        this.dataTraitSupplier = Suppliers.memoize(
+                Objects.requireNonNull(dataTraitSupplier, "Data Trait can not be null")
         );
     }
 
@@ -61,23 +98,36 @@ public class LogicalProperties {
         return outputSupplier.get();
     }
 
+    public Set<Slot> getOutputSet() {
+        return outputSetSupplier.get();
+    }
+
+    public Map<Slot, Slot> getOutputMap() {
+        return outputMapSupplier.get();
+    }
+
     public Set<ExprId> getOutputExprIdSet() {
-        if (outputExprIdSet == null) {
-            outputExprIdSet = this.outputSupplier.get().stream()
-                    .map(NamedExpression::getExprId).collect(Collectors.toSet());
-        }
-        return outputExprIdSet;
+        return outputExprIdSetSupplier.get();
+    }
+
+    public DataTrait getTrait() {
+        return dataTraitSupplier.get();
     }
 
     public List<Id> getOutputExprIds() {
-        if (outputExprIds == null) {
-            outputExprIds = outputExprIdSet.stream().map(Id.class::cast).collect(Collectors.toList());
-        }
-        return outputExprIds;
+        return outputExprIdsSupplier.get();
     }
 
-    public LogicalProperties withOutput(List<Slot> output) {
-        return new LogicalProperties(Suppliers.ofInstance(output));
+    @Override
+    public String toString() {
+        return "LogicalProperties{"
+                + "\noutputSupplier=" + outputSupplier.get()
+                + "\noutputExprIdsSupplier=" + outputExprIdsSupplier.get()
+                + "\noutputSetSupplier=" + outputSetSupplier.get()
+                + "\noutputMapSupplier=" + outputMapSupplier.get()
+                + "\noutputExprIdSetSupplier=" + outputExprIdSetSupplier.get()
+                + "\nhashCode=" + hashCode
+                + '}';
     }
 
     @Override
@@ -89,13 +139,24 @@ public class LogicalProperties {
             return false;
         }
         LogicalProperties that = (LogicalProperties) o;
-        return Objects.equals(outputSetSupplier.get(), that.outputSetSupplier.get());
+        Set<Slot> thisOutSet = this.outputSetSupplier.get();
+        Set<Slot> thatOutSet = that.outputSetSupplier.get();
+        if (!Objects.equals(thisOutSet, thatOutSet)) {
+            return false;
+        }
+        for (Slot thisOutSlot : thisOutSet) {
+            Slot thatOutSlot = that.getOutputMap().get(thisOutSlot);
+            if (thisOutSlot.nullable() != thatOutSlot.nullable()) {
+                return false;
+            }
+        }
+        return true;
     }
 
     @Override
     public int hashCode() {
         if (hashCode == null) {
-            hashCode = Objects.hash(outputSetSupplier.get());
+            hashCode = Objects.hash(outputExprIdSetSupplier.get());
         }
         return hashCode;
     }

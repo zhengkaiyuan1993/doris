@@ -17,7 +17,12 @@
 
 #include "util/bfd_parser.h"
 
+#include <stdio.h>
+#include <stdlib.h>
+
+#include <algorithm>
 #include <memory>
+#include <ostream>
 
 #include "common/logging.h"
 
@@ -102,9 +107,12 @@ BfdParser* BfdParser::create() {
     }
 
     char prog_name[1024];
-    // Ignore unused return value
-    if (fscanf(file, "%1023s ", prog_name))
-        ;
+
+    if (fscanf(file, "%1023s ", prog_name) != 1) {
+        fclose(file);
+        return nullptr;
+    }
+
     fclose(file);
     std::unique_ptr<BfdParser> parser(new BfdParser(prog_name));
     if (parser->parse()) {

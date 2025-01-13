@@ -96,7 +96,7 @@ public class MaterializedIndexMetaTest {
         columnNameToDefineExpr.put(mvColumnName, new FunctionCallExpr(new FunctionName("to_bitmap"), params));
         new Expectations() {
             {
-                stmt.parseDefineExprWithoutAnalyze();
+                stmt.parseDefineExpr(null);
                 result = columnNameToDefineExpr;
             }
         };
@@ -105,6 +105,7 @@ public class MaterializedIndexMetaTest {
         // 2. Read objects from file
         DataInputStream in = new DataInputStream(Files.newInputStream(path));
         MaterializedIndexMeta readIndexMeta = MaterializedIndexMeta.read(in);
+        readIndexMeta.parseStmt(null);
         Assert.assertEquals(1, readIndexMeta.getIndexId());
         List<Column> resultColumns = readIndexMeta.getSchema();
         for (Column column : resultColumns) {

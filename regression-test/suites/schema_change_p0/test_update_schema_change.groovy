@@ -16,6 +16,10 @@
 // under the License.
 
 suite ("test_update_schema_change") {
+
+    sql """ SET enable_nereids_planner=true """
+    sql """ SET enable_fallback_to_original_planner=false """
+
     def tableName = "schema_change_update_test"
 
     def getAlterColumnJobState = { tbName ->
@@ -34,11 +38,12 @@ suite ("test_update_schema_change") {
             `last_visit_date` DATETIME DEFAULT "1970-01-01 00:00:00" COMMENT "用户最后一次访问时间",
             `last_update_date` DATETIME DEFAULT "1970-01-01 00:00:00" COMMENT "用户最后一次更新时间",
             `last_visit_date_not_null` DATETIME NOT NULL DEFAULT "1970-01-01 00:00:00" COMMENT "用户最后一次访问时间",
-            `cost` BIGINT DEFAULT "0" COMMENT "用户总消费",
-            `max_dwell_time` INT DEFAULT "0" COMMENT "用户最大停留时间",
-            `min_dwell_time` INT DEFAULT "99999" COMMENT "用户最小停留时间")
+            `cost` BIGINT DEFAULT 0 COMMENT "用户总消费",
+            `max_dwell_time` INT DEFAULT 0 COMMENT "用户最大停留时间",
+            `min_dwell_time` INT DEFAULT 99999 COMMENT "用户最小停留时间")
         UNIQUE KEY(`user_id`, `date`, `city`, `age`, `sex`) DISTRIBUTED BY HASH(`user_id`)
-        PROPERTIES ( "replication_num" = "1" , "light_schema_change" = "true");
+        BUCKETS 8
+        PROPERTIES ( "replication_num" = "1" , "light_schema_change" = "false");
         """
 
     sql """ 
@@ -53,14 +58,20 @@ suite ("test_update_schema_change") {
 
     qt_sc """ SELECT * FROM ${tableName} order by user_id ASC, last_visit_date; """
 
+    // alter and test light schema change
+    if (!isCloudMode()) {
+        sql """ALTER TABLE ${tableName} SET ("light_schema_change" = "true");"""
+    }
+
     sql """
-        ALTER table ${tableName} ADD COLUMN new_column INT default "1";
+        ALTER table ${tableName} ADD COLUMN new_column INT default 1;
         """
 
     def max_try_secs = 60
     while (max_try_secs--) {
         String result = getAlterColumnJobState(tableName)
         if (result == "FINISHED") {
+            sleep(3000)
             break
         } else {
             Thread.sleep(2000)
@@ -107,6 +118,7 @@ suite ("test_update_schema_change") {
     while (max_try_secs--) {
         String result = getAlterColumnJobState(tableName)
         if (result == "FINISHED") {
+            sleep(3000)
             break
         } else {
             Thread.sleep(2000)

@@ -18,15 +18,19 @@
 package org.apache.doris.nereids.trees.plans.physical;
 
 import org.apache.doris.nereids.memo.GroupExpression;
+import org.apache.doris.nereids.properties.DataTrait;
 import org.apache.doris.nereids.properties.LogicalProperties;
 import org.apache.doris.nereids.properties.OrderKey;
 import org.apache.doris.nereids.properties.PhysicalProperties;
+import org.apache.doris.nereids.trees.expressions.Slot;
+import org.apache.doris.nereids.trees.plans.ObjectId;
 import org.apache.doris.nereids.trees.plans.Plan;
 import org.apache.doris.nereids.trees.plans.PlanType;
+import org.apache.doris.nereids.trees.plans.SortPhase;
 import org.apache.doris.nereids.trees.plans.algebra.TopN;
 import org.apache.doris.nereids.trees.plans.visitor.PlanVisitor;
 import org.apache.doris.nereids.util.Utils;
-import org.apache.doris.statistics.StatsDeriveResult;
+import org.apache.doris.statistics.Statistics;
 
 import com.google.common.base.Preconditions;
 
@@ -39,44 +43,42 @@ import java.util.Optional;
  */
 public class PhysicalTopN<CHILD_TYPE extends Plan> extends AbstractPhysicalSort<CHILD_TYPE> implements TopN {
 
-    private final int limit;
-    private final int offset;
+    private final long limit;
+    private final long offset;
 
-    public PhysicalTopN(List<OrderKey> orderKeys, int limit, int offset,
-            LogicalProperties logicalProperties, CHILD_TYPE child) {
-        this(orderKeys, limit, offset, Optional.empty(), logicalProperties, child);
+    public PhysicalTopN(List<OrderKey> orderKeys, long limit, long offset,
+            SortPhase phase, LogicalProperties logicalProperties, CHILD_TYPE child) {
+        this(orderKeys, limit, offset, phase, Optional.empty(), logicalProperties, child);
     }
 
     /**
      * Constructor of PhysicalHashJoinNode.
      */
-    public PhysicalTopN(List<OrderKey> orderKeys, int limit, int offset,
-            Optional<GroupExpression> groupExpression, LogicalProperties logicalProperties,
-            CHILD_TYPE child) {
-        super(PlanType.PHYSICAL_TOP_N, orderKeys, groupExpression, logicalProperties, child);
-        Objects.requireNonNull(orderKeys, "orderKeys should not be null in PhysicalTopN.");
-        this.limit = limit;
-        this.offset = offset;
+    public PhysicalTopN(List<OrderKey> orderKeys, long limit, long offset,
+            SortPhase phase,
+            Optional<GroupExpression> groupExpression, LogicalProperties logicalProperties, CHILD_TYPE child) {
+        this(orderKeys, limit, offset, phase, groupExpression,
+                logicalProperties, null, null, child);
     }
 
     /**
      * Constructor of PhysicalHashJoinNode.
      */
-    public PhysicalTopN(List<OrderKey> orderKeys, int limit, int offset,
-            Optional<GroupExpression> groupExpression, LogicalProperties logicalProperties,
-            PhysicalProperties physicalProperties, StatsDeriveResult statsDeriveResult, CHILD_TYPE child) {
-        super(PlanType.PHYSICAL_TOP_N, orderKeys, groupExpression, logicalProperties, physicalProperties,
-                statsDeriveResult, child);
+    public PhysicalTopN(List<OrderKey> orderKeys, long limit, long offset,
+            SortPhase phase, Optional<GroupExpression> groupExpression, LogicalProperties logicalProperties,
+            PhysicalProperties physicalProperties, Statistics statistics, CHILD_TYPE child) {
+        super(PlanType.PHYSICAL_TOP_N, orderKeys, phase, groupExpression, logicalProperties, physicalProperties,
+                statistics, child);
         Objects.requireNonNull(orderKeys, "orderKeys should not be null in PhysicalTopN.");
         this.limit = limit;
         this.offset = offset;
     }
 
-    public int getLimit() {
+    public long getLimit() {
         return limit;
     }
 
-    public int getOffset() {
+    public long getOffset() {
         return offset;
     }
 
@@ -92,7 +94,9 @@ public class PhysicalTopN<CHILD_TYPE extends Plan> extends AbstractPhysicalSort<
             return false;
         }
         PhysicalTopN<?> that = (PhysicalTopN<?>) o;
-        return limit == that.limit && offset == that.offset;
+        return limit == that.limit && offset == that.offset
+                && this.phase == that.phase
+                && Objects.equals(that.getOrderKeys(), getOrderKeys());
     }
 
     @Override
@@ -107,33 +111,91 @@ public class PhysicalTopN<CHILD_TYPE extends Plan> extends AbstractPhysicalSort<
 
     @Override
     public PhysicalTopN<Plan> withChildren(List<Plan> children) {
-        Preconditions.checkArgument(children.size() == 1);
-        return new PhysicalTopN<>(orderKeys, limit, offset, getLogicalProperties(), children.get(0));
+        Preconditions.checkArgument(children.size() == 1,
+                "PhysicalTopN's children size must be 1, but real is %s", children.size());
+        return new PhysicalTopN<>(orderKeys, limit, offset, phase, groupExpression,
+                getLogicalProperties(), physicalProperties, statistics, children.get(0));
     }
 
     @Override
     public PhysicalTopN<CHILD_TYPE> withGroupExpression(Optional<GroupExpression> groupExpression) {
-        return new PhysicalTopN<>(orderKeys, limit, offset, groupExpression, getLogicalProperties(), child());
+        return new PhysicalTopN<>(orderKeys, limit, offset, phase,
+                groupExpression, getLogicalProperties(), child());
     }
 
     @Override
-    public PhysicalTopN<CHILD_TYPE> withLogicalProperties(Optional<LogicalProperties> logicalProperties) {
-        return new PhysicalTopN<>(orderKeys, limit, offset, Optional.empty(), logicalProperties.get(), child());
+    public PhysicalTopN<Plan> withGroupExprLogicalPropChildren(Optional<GroupExpression> groupExpression,
+            Optional<LogicalProperties> logicalProperties, List<Plan> children) {
+        Preconditions.checkArgument(children.size() == 1,
+                "PhysicalTopN's children size must be 1, but real is %s", children.size());
+        return new PhysicalTopN<>(orderKeys, limit, offset, phase,
+                groupExpression, logicalProperties.get(), children.get(0));
     }
 
     @Override
     public PhysicalTopN<CHILD_TYPE> withPhysicalPropertiesAndStats(PhysicalProperties physicalProperties,
-            StatsDeriveResult statsDeriveResult) {
-        return new PhysicalTopN<>(orderKeys, limit, offset, Optional.empty(),
-                getLogicalProperties(), physicalProperties, statsDeriveResult, child());
+            Statistics statistics) {
+        return new PhysicalTopN<>(orderKeys, limit, offset, phase,
+                groupExpression, getLogicalProperties(), physicalProperties, statistics, child());
+    }
+
+    @Override
+    public String shapeInfo() {
+        return this.getClass().getSimpleName() + "[" + phase + "]";
     }
 
     @Override
     public String toString() {
-        return Utils.toSqlString("PhysicalTopN",
+        return Utils.toSqlString("PhysicalTopN[" + id.asInt() + "]" + getGroupIdWithPrefix(),
+                "stats", statistics,
                 "limit", limit,
                 "offset", offset,
-                "orderKeys", orderKeys
+                "orderKeys", orderKeys,
+                "phase", phase.toString()
         );
+    }
+
+    @Override
+    public List<Slot> computeOutput() {
+        return child().getOutput();
+    }
+
+    @Override
+    public PhysicalTopN<Plan> resetLogicalProperties() {
+        return new PhysicalTopN<>(orderKeys, limit, offset, phase, groupExpression,
+                null, physicalProperties, statistics, child());
+    }
+
+    @Override
+    public void computeUnique(DataTrait.Builder builder) {
+        if (getLimit() == 1) {
+            getOutput().forEach(builder::addUniqueSlot);
+        } else {
+            builder.addUniqueSlot(child(0).getLogicalProperties().getTrait());
+        }
+    }
+
+    @Override
+    public void computeUniform(DataTrait.Builder builder) {
+        if (getLimit() == 1) {
+            getOutput().forEach(builder::addUniformSlot);
+        } else {
+            builder.addUniformSlot(child(0).getLogicalProperties().getTrait());
+        }
+    }
+
+    @Override
+    public void computeEqualSet(DataTrait.Builder builder) {
+        builder.addEqualSet(child(0).getLogicalProperties().getTrait());
+    }
+
+    @Override
+    public void computeFd(DataTrait.Builder builder) {
+        builder.addFuncDepsDG(child().getLogicalProperties().getTrait());
+    }
+
+    @Override
+    public ObjectId getObjectId() {
+        return id;
     }
 }

@@ -19,31 +19,47 @@
 
 #include <parallel_hashmap/phmap.h>
 
+#include <boost/noncopyable.hpp>
+#include <span>
+
 #include "vec/common/hash_table/hash.h"
-#include "vec/common/hash_table/hash_table_utils.h"
+#include "vec/common/hash_table/phmap_fwd_decl.h"
 
 template <typename Key, typename Mapped>
 ALWAYS_INLINE inline auto lookup_result_get_mapped(std::pair<const Key, Mapped>* it) {
     return &(it->second);
 }
 
-template <typename Key, typename Mapped, typename Hash = DefaultHash<Key>,
-          bool use_parallel = false>
+template <typename Key, typename Mapped, typename HashMethod = DefaultHash<Key>>
 class PHHashMap : private boost::noncopyable {
 public:
     using Self = PHHashMap;
-    using HashMapImpl =
-            std::conditional_t<use_parallel, phmap::parallel_flat_hash_map<Key, Mapped, Hash>,
-                               phmap::flat_hash_map<Key, Mapped, Hash>>;
+    using Hash = HashMethod;
+    using cell_type = std::pair<const Key, Mapped>;
+    using HashMapImpl = doris::vectorized::flat_hash_map<Key, Mapped, Hash>;
 
     using key_type = Key;
     using mapped_type = Mapped;
+    using Value = Mapped;
     using value_type = std::pair<const Key, Mapped>;
 
     using LookupResult = std::pair<const Key, Mapped>*;
+    using ConstLookupResult = const std::pair<const Key, Mapped>*;
 
     using const_iterator_impl = typename HashMapImpl::const_iterator;
     using iterator_impl = typename HashMapImpl::iterator;
+
+    PHHashMap() = default;
+
+    PHHashMap(size_t reserve_for_num_elements) { _hash_map.reserve(reserve_for_num_elements); }
+
+    PHHashMap(PHHashMap&& other) { *this = std::move(other); }
+
+    PHHashMap& operator=(PHHashMap&& rhs) {
+        _hash_map.clear();
+        _hash_map = std::move(rhs._hash_map);
+        return *this;
+    }
 
     template <typename Derived, bool is_const>
     class iterator_base {
@@ -80,10 +96,8 @@ public:
 
         auto& get_second() { return base_iterator->second; }
 
-        auto get_ptr() const { return *base_iterator; }
+        auto get_ptr() const { return this; }
         size_t get_hash() const { return base_iterator->get_hash(); }
-
-        size_t get_collision_chain_length() const { return 0; }
     };
 
     class iterator : public iterator_base<iterator, false> {
@@ -108,93 +122,60 @@ public:
 
     template <typename KeyHolder>
     void ALWAYS_INLINE emplace(KeyHolder&& key_holder, LookupResult& it, bool& inserted) {
-        const auto& key = key_holder_get_key(key_holder);
         inserted = false;
-        auto it_ = _hash_map.lazy_emplace(key, [&](const auto& ctor) {
+        it = &*_hash_map.lazy_emplace(key_holder, [&](const auto& ctor) {
             inserted = true;
-            key_holder_persist_key(key_holder);
-            ctor(key_holder_get_key(key_holder), nullptr);
+            ctor(key_holder, nullptr);
         });
-        it = &*it_;
     }
 
     template <typename KeyHolder, typename Func>
     void ALWAYS_INLINE lazy_emplace(KeyHolder&& key_holder, LookupResult& it, Func&& f) {
-        const auto& key = key_holder_get_key(key_holder);
-        auto it_ = _hash_map.lazy_emplace(key, [&](const auto& ctor) {
-            key_holder_persist_key(key_holder);
-            f(ctor, key);
-        });
-        it = &*it_;
+        it = &*_hash_map.lazy_emplace(key_holder, [&](const auto& ctor) { f(ctor, key_holder); });
     }
 
     template <typename KeyHolder>
-    void ALWAYS_INLINE emplace(KeyHolder&& key_holder, LookupResult& it, size_t hash_value,
-                               bool& inserted) {
-        const auto& key = key_holder_get_key(key_holder);
+    void ALWAYS_INLINE emplace(KeyHolder&& key, LookupResult& it, bool& inserted,
+                               size_t hash_value) {
         inserted = false;
-        if constexpr (use_parallel) {
-            auto it_ = _hash_map.lazy_emplace_with_hash(hash_value, key, [&](const auto& ctor) {
-                inserted = true;
-                key_holder_persist_key(key_holder);
+        it = &*_hash_map.lazy_emplace_with_hash(key, hash_value, [&](const auto& ctor) {
+            inserted = true;
+            if constexpr (std::is_pointer_v<std::remove_reference_t<mapped_type>>) {
                 ctor(key, nullptr);
-            });
-            it = &*it_;
-        } else {
-            auto it_ = _hash_map.lazy_emplace_with_hash(key, hash_value, [&](const auto& ctor) {
-                inserted = true;
-                key_holder_persist_key(key_holder);
-                ctor(key, nullptr);
-            });
-            it = &*it_;
-        }
+            } else {
+                ctor(key, mapped_type());
+            }
+        });
     }
 
     template <typename KeyHolder, typename Func>
-    void ALWAYS_INLINE lazy_emplace(KeyHolder&& key_holder, LookupResult& it, size_t hash_value,
+    void ALWAYS_INLINE lazy_emplace(KeyHolder&& key, LookupResult& it, size_t hash_value,
                                     Func&& f) {
-        const auto& key = key_holder_get_key(key_holder);
-        if constexpr (use_parallel) {
-            auto it_ = _hash_map.lazy_emplace_with_hash(hash_value, key, [&](const auto& ctor) {
-                key_holder_persist_key(key_holder);
-                f(ctor, key);
-            });
-            it = &*it_;
-        } else {
-            auto it_ = _hash_map.lazy_emplace_with_hash(key, hash_value, [&](const auto& ctor) {
-                key_holder_persist_key(key_holder);
-                f(ctor, key);
-            });
-            it = &*it_;
-        }
+        it = &*_hash_map.lazy_emplace_with_hash(key, hash_value,
+                                                [&](const auto& ctor) { f(ctor, key, key); });
+    }
+
+    void ALWAYS_INLINE insert(const Key& key, const Mapped& value) {
+        _hash_map.lazy_emplace(key, [&](const auto& ctor) { ctor(key, value); });
     }
 
     template <typename KeyHolder>
-    LookupResult ALWAYS_INLINE find(KeyHolder&& key_holder) {
-        const auto& key = key_holder_get_key(key_holder);
+    LookupResult ALWAYS_INLINE find(KeyHolder&& key) {
         auto it = _hash_map.find(key);
         return it != _hash_map.end() ? &*it : nullptr;
     }
 
     template <typename KeyHolder>
-    LookupResult ALWAYS_INLINE find(KeyHolder&& key_holder, size_t hash_value) {
-        const auto& key = key_holder_get_key(key_holder);
+    LookupResult ALWAYS_INLINE find(KeyHolder&& key, size_t hash_value) {
         auto it = _hash_map.find(key, hash_value);
         return it != _hash_map.end() ? &*it : nullptr;
     }
 
     size_t hash(const Key& x) const { return _hash_map.hash(x); }
 
-    void ALWAYS_INLINE prefetch_by_hash(size_t hash_value) {
-        if constexpr (!use_parallel) _hash_map.prefetch_hash(hash_value);
-    }
-
-    void ALWAYS_INLINE prefetch_by_key(Key key) { _hash_map.prefetch(key); }
-
-    /// Call func(const Key &, Mapped &) for each hash map element.
-    template <typename Func>
-    void for_each_value(Func&& func) {
-        for (auto& v : *this) func(v.get_first(), v.get_second());
+    template <bool read>
+    void ALWAYS_INLINE prefetch(const Key& key, size_t hash_value) {
+        _hash_map.prefetch_hash(hash_value);
     }
 
     /// Call func(Mapped &) for each hash map element.
@@ -215,16 +196,18 @@ public:
     }
 
     size_t size() const { return _hash_map.size(); }
-
-    char* get_null_key_data() { return nullptr; }
+    template <typename MappedType>
+    char* get_null_key_data() {
+        return nullptr;
+    }
     bool has_null_key_data() const { return false; }
 
-    HashMapImpl _hash_map;
-};
+    bool empty() const { return _hash_map.empty(); }
 
-template <typename Key, typename Mapped, typename Hash, bool use_parallel>
-struct HashTableTraits<PHHashMap<Key, Mapped, Hash, use_parallel>> {
-    static constexpr bool is_phmap = true;
-    static constexpr bool is_parallel_phmap = use_parallel;
-    static constexpr bool is_string_hash_table = false;
+    void clear_and_shrink() { _hash_map.clear(); }
+
+    void reserve(size_t num_elem) { _hash_map.reserve(num_elem); }
+
+private:
+    HashMapImpl _hash_map;
 };

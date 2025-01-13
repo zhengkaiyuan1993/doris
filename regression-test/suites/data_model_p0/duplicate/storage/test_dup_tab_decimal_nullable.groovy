@@ -18,6 +18,7 @@
 suite("test_dup_tab_decimal_nullable") {
 
     def table1 = "test_dup_tab_decimal_nullable"
+    sql  "ADMIN SET FRONTEND CONFIG ('disable_decimalv2' = 'false')"
 
     sql "drop table if exists ${table1}"
 
@@ -38,8 +39,6 @@ PROPERTIES (
 )
     """
 
-    sql "set enable_vectorized_engine = false"
-
     sql """insert into ${table1} values(1.1,1.2,1.3,1.4),
         (1.1,2.2,2.3,3.4),
         (2.1,2.2,2.3,2.4),
@@ -48,9 +47,7 @@ PROPERTIES (
         (null,2,null,4)
 """
 
-    sql "set enable_vectorized_engine = true"
-
-    // query decimal
+// query decimal
     test {
         sql "select siteid from ${table1} order by siteid"
         result([[null],[1.10000],[1.10000],[2.10000],[3.10000],[4.10000]])

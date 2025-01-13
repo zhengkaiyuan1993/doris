@@ -17,14 +17,13 @@
 
 package org.apache.doris.qe;
 
+import org.apache.doris.analysis.UserIdentity;
 import org.apache.doris.catalog.Env;
-import org.apache.doris.common.Config;
-import org.apache.doris.common.ErrorCode;
+import org.apache.doris.common.Status;
 import org.apache.doris.common.ThreadPoolManager;
 import org.apache.doris.common.util.DebugUtil;
-import org.apache.doris.mysql.MysqlProto;
-import org.apache.doris.mysql.nio.NConnectContext;
 import org.apache.doris.mysql.privilege.PrivPredicate;
+import org.apache.doris.qe.ConnectContext.ConnectType;
 import org.apache.doris.thrift.TUniqueId;
 
 import com.google.common.collect.Lists;
@@ -32,10 +31,10 @@ import com.google.common.collect.Maps;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.TimerTask;
-import java.util.concurrent.ExecutorService;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -50,8 +49,7 @@ public class ConnectScheduler {
     private final AtomicInteger nextConnectionId;
     private final Map<Integer, ConnectContext> connectionMap = Maps.newConcurrentMap();
     private final Map<String, AtomicInteger> connByUser = Maps.newConcurrentMap();
-    private final ExecutorService executor = ThreadPoolManager.newDaemonCacheThreadPool(
-            Config.max_connection_scheduler_threads_num, "connect-scheduler-pool", true);
+    private final Map<String, Integer> flightToken2ConnectionId = Maps.newConcurrentMap();
 
     // valid trace id -> query id
     private final Map<String, TUniqueId> traceId2QueryId = Maps.newConcurrentMap();
@@ -80,26 +78,24 @@ public class ConnectScheduler {
         }
     }
 
-    // submit one MysqlContext to this scheduler.
+    // submit one MysqlContext or ArrowFlightSqlContext to this scheduler.
     // return true, if this connection has been successfully submitted, otherwise return false.
     // Caller should close ConnectContext if return false.
     public boolean submit(ConnectContext context) {
         if (context == null) {
             return false;
         }
-
         context.setConnectionId(nextConnectionId.getAndAdd(1));
-        // no necessary for nio.
-        if (context instanceof NConnectContext) {
-            return true;
-        }
-        executor.submit(new LoopHandler(context));
+        context.resetLoginTime();
         return true;
     }
 
     // Register one connection with its connection id.
     public boolean registerConnection(ConnectContext ctx) {
         if (numberConnection.incrementAndGet() > maxConnections) {
+            LOG.info("Number connection {} has reach upper limit {}. Connection map : [{}], "
+                    + "connByUser: [{}], flightToken2ConnectionId: [{}]",
+                    numberConnection.get(), maxConnections, connectionMap, connByUser, flightToken2ConnectionId);
             numberConnection.decrementAndGet();
             return false;
         }
@@ -107,11 +103,18 @@ public class ConnectScheduler {
         connByUser.putIfAbsent(ctx.getQualifiedUser(), new AtomicInteger(0));
         AtomicInteger conns = connByUser.get(ctx.getQualifiedUser());
         if (conns.incrementAndGet() > ctx.getEnv().getAuth().getMaxConn(ctx.getQualifiedUser())) {
+            LOG.info("User {}'s connection {} has reached upper limit {}. numberConnection {}, "
+                    + "Connection map : [{}], connByUser: [{}], flightToken2ConnectionId: [{}]",
+                    ctx.getQualifiedUser(), conns.get(), ctx.getEnv().getAuth().getMaxConn(ctx.getQualifiedUser()),
+                    numberConnection.get(), connectionMap, connByUser, flightToken2ConnectionId);
             conns.decrementAndGet();
             numberConnection.decrementAndGet();
             return false;
         }
         connectionMap.put(ctx.getConnectionId(), ctx);
+        if (ctx.getConnectType().equals(ConnectType.ARROW_FLIGHT_SQL)) {
+            flightToken2ConnectionId.put(ctx.getPeerIdentity(), ctx.getConnectionId());
+        }
         return true;
     }
 
@@ -123,6 +126,9 @@ public class ConnectScheduler {
                 conns.decrementAndGet();
             }
             numberConnection.decrementAndGet();
+            if (ctx.getConnectType().equals(ConnectType.ARROW_FLIGHT_SQL)) {
+                flightToken2ConnectionId.remove(ctx.getPeerIdentity());
+            }
         }
     }
 
@@ -130,11 +136,28 @@ public class ConnectScheduler {
         return connectionMap.get(connectionId);
     }
 
-    public void cancelQuery(String queryId) {
+    public ConnectContext getContextWithQueryId(String queryId) {
+        for (ConnectContext context : connectionMap.values()) {
+            if (queryId.equals(DebugUtil.printId(context.queryId))) {
+                return context;
+            }
+        }
+        return null;
+    }
+
+    public ConnectContext getContext(String flightToken) {
+        if (flightToken2ConnectionId.containsKey(flightToken)) {
+            int connectionId = flightToken2ConnectionId.get(flightToken);
+            return getContext(connectionId);
+        }
+        return null;
+    }
+
+    public void cancelQuery(String queryId, Status cancelReason) {
         for (ConnectContext ctx : connectionMap.values()) {
             TUniqueId qid = ctx.queryId();
             if (qid != null && DebugUtil.printId(qid).equals(queryId)) {
-                ctx.cancelQuery();
+                ctx.cancelQuery(cancelReason);
                 break;
             }
         }
@@ -148,14 +171,31 @@ public class ConnectScheduler {
         List<ConnectContext.ThreadInfo> infos = Lists.newArrayList();
         for (ConnectContext ctx : connectionMap.values()) {
             // Check auth
-            if (!ctx.getQualifiedUser().equals(user) && !Env.getCurrentEnv().getAuth()
-                    .checkGlobalPriv(ConnectContext.get(), PrivPredicate.GRANT)) {
+            if (!ctx.getQualifiedUser().equals(user) && !Env.getCurrentEnv().getAccessManager()
+                    .checkGlobalPriv(ConnectContext.get(), PrivPredicate.ADMIN)) {
                 continue;
             }
 
             infos.add(ctx.toThreadInfo(isFull));
         }
         return infos;
+    }
+
+    // used for thrift
+    public List<List<String>> listConnectionForRpc(UserIdentity userIdentity, boolean isShowFullSql) {
+        List<List<String>> list = new ArrayList<>();
+        long nowMs = System.currentTimeMillis();
+        for (ConnectContext ctx : connectionMap.values()) {
+            // Check auth
+            if (!ctx.getCurrentUserIdentity().equals(userIdentity) && !Env.getCurrentEnv()
+                    .getAccessManager()
+                    .checkGlobalPriv(userIdentity, PrivPredicate.GRANT)) {
+                LOG.info("connection filtered by auth, {}", ctx);
+                continue;
+            }
+            list.add(ctx.toThreadInfo(isShowFullSql).toRow(-1, nowMs));
+        }
+        return list;
     }
 
     public void putTraceId2QueryId(String traceId, TUniqueId queryId) {
@@ -167,47 +207,11 @@ public class ConnectScheduler {
         return queryId == null ? "" : DebugUtil.printId(queryId);
     }
 
-    private class LoopHandler implements Runnable {
-        ConnectContext context;
+    public Map<Integer, ConnectContext> getConnectionMap() {
+        return connectionMap;
+    }
 
-        LoopHandler(ConnectContext context) {
-            this.context = context;
-        }
-
-        @Override
-        public void run() {
-            try {
-                // Set thread local info
-                context.setThreadLocalInfo();
-                context.setConnectScheduler(ConnectScheduler.this);
-                // authenticate check failed.
-                if (!MysqlProto.negotiate(context)) {
-                    return;
-                }
-
-                if (registerConnection(context)) {
-                    MysqlProto.sendResponsePacket(context);
-                } else {
-                    context.getState().setError(ErrorCode.ERR_USER_LIMIT_REACHED, "Reach limit of connections");
-                    MysqlProto.sendResponsePacket(context);
-                    return;
-                }
-
-                context.setUserQueryTimeout(context.getEnv().getAuth().getQueryTimeout(context.getQualifiedUser()));
-                context.setStartTime();
-                ConnectProcessor processor = new ConnectProcessor(context);
-                processor.loop();
-            } catch (Exception e) {
-                // for unauthorized access such lvs probe request, may cause exception, just log it in debug level
-                if (context.getCurrentUserIdentity() != null) {
-                    LOG.warn("connect processor exception because ", e);
-                } else {
-                    LOG.debug("connect processor exception because ", e);
-                }
-            } finally {
-                unregisterConnection(context);
-                context.cleanup();
-            }
-        }
+    public Map<String, AtomicInteger> getUserConnectionMap() {
+        return connByUser;
     }
 }

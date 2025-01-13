@@ -20,15 +20,15 @@ package org.apache.doris.nereids.trees.plans.algebra;
 import org.apache.doris.nereids.trees.expressions.Expression;
 import org.apache.doris.nereids.util.ExpressionUtils;
 
-import java.util.List;
+import java.util.Set;
 
 /**
  * Common interface for logical/physical filter.
  */
 public interface Filter {
-    Expression getPredicates();
+    Set<Expression> getConjuncts();
 
-    default List<Expression> getConjuncts() {
-        return ExpressionUtils.extractConjunction(getPredicates());
+    default Expression getPredicate() {
+        return ExpressionUtils.and(getConjuncts());
     }
 }

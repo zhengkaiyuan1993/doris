@@ -42,6 +42,8 @@
 
 #pragma once
 
+#include <pdqsort.h>
+
 #include <algorithm>
 #include <cfloat>
 #include <cmath>
@@ -51,10 +53,10 @@
 #include <utility>
 #include <vector>
 
+#include "common/factory_creator.h"
 #include "common/logging.h"
 #include "udf/udf.h"
 #include "util/debug_util.h"
-#include "util/radix_sort.h"
 
 namespace doris {
 
@@ -119,19 +121,7 @@ struct CentroidComparator {
 };
 
 class TDigest {
-    struct TDigestRadixSortTraits {
-        using Element = Centroid;
-        using Key = Value;
-        using CountType = uint32_t;
-        using KeyBits = uint32_t;
-
-        static constexpr size_t PART_SIZE_BITS = 8;
-
-        using Transform = RadixSortFloatTransform<KeyBits>;
-        using Allocator = RadixSortMallocAllocator;
-
-        static Key& extractKey(Element& elem) { return elem.mean(); }
-    };
+    ENABLE_FACTORY_CREATOR(TDigest);
 
     class TDigestComparator {
     public:
@@ -645,7 +635,10 @@ private:
     // when complete, _unprocessed will be empty and _processed will have at most _max_processed centroids
     void process() {
         CentroidComparator cc;
-        RadixSort<TDigestRadixSortTraits>::executeLSD(_unprocessed.data(), _unprocessed.size());
+        // select percentile_approx(lo_orderkey,0.5) from lineorder;
+        // have test pdqsort and RadixSort, find here pdqsort performance is better when data is struct Centroid
+        // But when sort plain type like int/float of std::vector<T>, find RadixSort is better
+        pdqsort(_unprocessed.begin(), _unprocessed.end(), cc);
         auto count = _unprocessed.size();
         _unprocessed.insert(_unprocessed.end(), _processed.cbegin(), _processed.cend());
         std::inplace_merge(_unprocessed.begin(), _unprocessed.begin() + count, _unprocessed.end(),

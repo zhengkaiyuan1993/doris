@@ -17,225 +17,92 @@
 
 #pragma once
 
-#include <ctime>
+#include <gen_cpp/internal_service.pb.h>
+#include <stdint.h>
+
+#include <condition_variable>
+#include <functional>
 #include <memory>
 #include <mutex>
-#include <thread>
 #include <unordered_map>
+#include <utility>
 
+#include "common/compiler_util.h" // IWYU pragma: keep
 #include "common/status.h"
-#include "gen_cpp/PaloInternalService_types.h"
-#include "gen_cpp/Types_types.h"
-#include "gen_cpp/internal_service.pb.h"
 #include "gutil/ref_counted.h"
 #include "olap/lru_cache.h"
+#include "olap/memtable_memory_limiter.h"
 #include "runtime/load_channel.h"
-#include "runtime/tablets_channel.h"
+#include "runtime/memory/lru_cache_policy.h"
+#include "runtime/memory/mem_tracker_limiter.h"
 #include "runtime/thread_context.h"
 #include "util/countdown_latch.h"
-#include "util/thread.h"
 #include "util/uid_util.h"
 
 namespace doris {
 
-class Cache;
+class PTabletWriterCancelRequest;
+class PTabletWriterOpenRequest;
+class Thread;
 
 // LoadChannelMgr -> LoadChannel -> TabletsChannel -> DeltaWriter
 // All dispatched load data for this backend is routed from this class
 class LoadChannelMgr {
 public:
     LoadChannelMgr();
-    ~LoadChannelMgr();
 
     Status init(int64_t process_mem_limit);
 
     // open a new load channel if not exist
     Status open(const PTabletWriterOpenRequest& request);
 
-    template <typename TabletWriterAddRequest, typename TabletWriterAddResult>
-    Status add_batch(const TabletWriterAddRequest& request, TabletWriterAddResult* response);
+    Status add_batch(const PTabletWriterAddBlockRequest& request,
+                     PTabletWriterAddBlockResult* response);
 
     // cancel all tablet stream for 'load_id' load
     Status cancel(const PTabletWriterCancelRequest& request);
 
+    void stop();
+
+    std::vector<std::string> get_all_load_channel_ids() {
+        std::vector<std::string> result;
+        std::lock_guard<std::mutex> lock(_lock);
+
+        for (auto& [id, _] : _load_channels) {
+            result.push_back(id.to_string());
+        }
+        return result;
+    }
+
 private:
-    template <typename Request>
     Status _get_load_channel(std::shared_ptr<LoadChannel>& channel, bool& is_eof,
-                             const UniqueId& load_id, const Request& request);
+                             const UniqueId& load_id, const PTabletWriterAddBlockRequest& request);
 
     void _finish_load_channel(UniqueId load_id);
-    // check if the total load mem consumption exceeds limit.
-    // If yes, it will pick a load channel to try to reduce memory consumption.
-    template <typename TabletWriterAddResult>
-    Status _handle_mem_exceed_limit(TabletWriterAddResult* response);
 
     Status _start_bg_worker();
+
+    class LastSuccessChannelCache : public LRUCachePolicy {
+    public:
+        LastSuccessChannelCache(size_t capacity)
+                : LRUCachePolicy(CachePolicy::CacheType::LAST_SUCCESS_CHANNEL_CACHE, capacity,
+                                 LRUCacheType::SIZE, -1, DEFAULT_LRU_CACHE_NUM_SHARDS,
+                                 DEFAULT_LRU_CACHE_ELEMENT_COUNT_CAPACITY, false) {}
+    };
 
 protected:
     // lock protect the load channel map
     std::mutex _lock;
     // load id -> load channel
     std::unordered_map<UniqueId, std::shared_ptr<LoadChannel>> _load_channels;
-    std::shared_ptr<LoadChannel> _reduce_memory_channel = nullptr;
-    Cache* _last_success_channel = nullptr;
+    std::unique_ptr<LastSuccessChannelCache> _last_success_channels;
 
-    // check the total load channel mem consumption of this Backend
-    std::shared_ptr<MemTrackerLimiter> _mem_tracker;
-    int64_t _load_soft_mem_limit = -1;
-    int64_t _process_soft_mem_limit = -1;
-
-    // If hard limit reached, one thread will trigger load channel flush,
-    // other threads should wait on the condition variable.
-    bool _should_wait_flush = false;
-    std::condition_variable _wait_flush_cond;
+    MemTableMemoryLimiter* _memtable_memory_limiter = nullptr;
 
     CountDownLatch _stop_background_threads_latch;
     // thread to clean timeout load channels
     scoped_refptr<Thread> _load_channels_clean_thread;
     Status _start_load_channels_clean();
 };
-
-template <typename Request>
-Status LoadChannelMgr::_get_load_channel(std::shared_ptr<LoadChannel>& channel, bool& is_eof,
-                                         const UniqueId& load_id, const Request& request) {
-    is_eof = false;
-    std::lock_guard<std::mutex> l(_lock);
-    auto it = _load_channels.find(load_id);
-    if (it == _load_channels.end()) {
-        auto handle = _last_success_channel->lookup(load_id.to_string());
-        // success only when eos be true
-        if (handle != nullptr) {
-            _last_success_channel->release(handle);
-            if (request.has_eos() && request.eos()) {
-                is_eof = true;
-                return Status::OK();
-            }
-        }
-        return Status::InternalError("fail to add batch in load channel. unknown load_id={}",
-                                     load_id.to_string());
-    }
-    channel = it->second;
-    return Status::OK();
-}
-
-template <typename TabletWriterAddRequest, typename TabletWriterAddResult>
-Status LoadChannelMgr::add_batch(const TabletWriterAddRequest& request,
-                                 TabletWriterAddResult* response) {
-    UniqueId load_id(request.id());
-    // 1. get load channel
-    std::shared_ptr<LoadChannel> channel;
-    bool is_eof;
-    auto status = _get_load_channel(channel, is_eof, load_id, request);
-    if (!status.ok() || is_eof) {
-        return status;
-    }
-
-    if (!channel->is_high_priority()) {
-        // 2. check if mem consumption exceed limit
-        // If this is a high priority load task, do not handle this.
-        // because this may block for a while, which may lead to rpc timeout.
-        RETURN_IF_ERROR(_handle_mem_exceed_limit(response));
-    }
-
-    // 3. add batch to load channel
-    // batch may not exist in request(eg: eos request without batch),
-    // this case will be handled in load channel's add batch method.
-    RETURN_IF_ERROR(channel->add_batch(request, response));
-
-    // 4. handle finish
-    if (channel->is_finished()) {
-        _finish_load_channel(load_id);
-    }
-    return Status::OK();
-}
-
-template <typename TabletWriterAddResult>
-Status LoadChannelMgr::_handle_mem_exceed_limit(TabletWriterAddResult* response) {
-    // Check the soft limit.
-    DCHECK(_load_soft_mem_limit > 0);
-    DCHECK(_process_soft_mem_limit > 0);
-    if (_mem_tracker->consumption() < _load_soft_mem_limit &&
-        MemInfo::proc_mem_no_allocator_cache() < _process_soft_mem_limit) {
-        return Status::OK();
-    }
-    // Pick load channel to reduce memory.
-    std::shared_ptr<LoadChannel> channel;
-    {
-        std::unique_lock<std::mutex> l(_lock);
-        while (_should_wait_flush) {
-            LOG(INFO) << "Reached the load hard limit " << _mem_tracker->limit()
-                      << ", waiting for flush";
-            _wait_flush_cond.wait(l);
-        }
-        // Some other thread is flushing data, and not reached hard limit now,
-        // we don't need to handle mem limit in current thread.
-        if (_reduce_memory_channel != nullptr && !_mem_tracker->limit_exceeded() &&
-            MemInfo::proc_mem_no_allocator_cache() < _process_soft_mem_limit) {
-            return Status::OK();
-        }
-
-        // We need to pick a LoadChannel to reduce memory usage.
-        // If `_reduce_memory_channel` is not null, it means the hard limit is
-        // exceed now, we still need to pick a load channel again. Because
-        // `_reduce_memory_channel` might not be the largest consumer now.
-        int64_t max_consume = 0;
-        for (auto& kv : _load_channels) {
-            if (kv.second->is_high_priority()) {
-                // do not select high priority channel to reduce memory
-                // to avoid blocking them.
-                continue;
-            }
-            if (kv.second->mem_consumption() > max_consume) {
-                max_consume = kv.second->mem_consumption();
-                channel = kv.second;
-            }
-        }
-        if (max_consume == 0) {
-            // should not happen, add log to observe
-            LOG(WARNING) << "failed to find suitable load channel when total load mem limit exceed";
-            return Status::OK();
-        }
-        DCHECK(channel.get() != nullptr);
-        _reduce_memory_channel = channel;
-
-        std::ostringstream oss;
-        if (MemInfo::proc_mem_no_allocator_cache() < _process_soft_mem_limit) {
-            oss << "reducing memory of " << *channel << " because total load mem consumption "
-                << PrettyPrinter::print(_mem_tracker->consumption(), TUnit::BYTES)
-                << " has exceeded";
-            if (_mem_tracker->limit_exceeded()) {
-                _should_wait_flush = true;
-                oss << " hard limit: " << PrettyPrinter::print(_mem_tracker->limit(), TUnit::BYTES);
-            } else {
-                oss << " soft limit: " << PrettyPrinter::print(_load_soft_mem_limit, TUnit::BYTES);
-            }
-        } else {
-            _should_wait_flush = true;
-            oss << "reducing memory of " << *channel << " because process memory used "
-                << PerfCounters::get_vm_rss_str() << " has exceeded limit "
-                << PrettyPrinter::print(_process_soft_mem_limit, TUnit::BYTES)
-                << " , tc/jemalloc allocator cache " << MemInfo::allocator_cache_mem_str();
-        }
-        LOG(INFO) << oss.str();
-    }
-
-    // No matter soft limit or hard limit reached, only 1 thread will wait here,
-    // if hard limit reached, other threads will pend at the beginning of this
-    // method.
-    Status st = channel->handle_mem_exceed_limit(response);
-    LOG(INFO) << "reduce memory of " << *channel << " finished";
-
-    {
-        std::lock_guard<std::mutex> l(_lock);
-        if (_should_wait_flush) {
-            _should_wait_flush = false;
-            _wait_flush_cond.notify_all();
-        }
-        if (_reduce_memory_channel == channel) {
-            _reduce_memory_channel = nullptr;
-        }
-    }
-    return st;
-}
 
 } // namespace doris

@@ -21,18 +21,25 @@ import org.apache.doris.alter.AlterJobV2;
 import org.apache.doris.analysis.AlterSqlBlockRuleStmt;
 import org.apache.doris.analysis.AlterTableStmt;
 import org.apache.doris.analysis.Analyzer;
+import org.apache.doris.analysis.CreateCatalogStmt;
 import org.apache.doris.analysis.CreateDbStmt;
+import org.apache.doris.analysis.CreateFunctionStmt;
 import org.apache.doris.analysis.CreateMaterializedViewStmt;
 import org.apache.doris.analysis.CreatePolicyStmt;
 import org.apache.doris.analysis.CreateSqlBlockRuleStmt;
 import org.apache.doris.analysis.CreateTableAsSelectStmt;
 import org.apache.doris.analysis.CreateTableStmt;
+import org.apache.doris.analysis.CreateUserStmt;
 import org.apache.doris.analysis.CreateViewStmt;
+import org.apache.doris.analysis.DropDbStmt;
 import org.apache.doris.analysis.DropPolicyStmt;
 import org.apache.doris.analysis.DropSqlBlockRuleStmt;
 import org.apache.doris.analysis.DropTableStmt;
 import org.apache.doris.analysis.ExplainOptions;
+import org.apache.doris.analysis.RecoverTableStmt;
+import org.apache.doris.analysis.ShowCreateFunctionStmt;
 import org.apache.doris.analysis.ShowCreateTableStmt;
+import org.apache.doris.analysis.ShowFunctionsStmt;
 import org.apache.doris.analysis.SqlParser;
 import org.apache.doris.analysis.SqlScanner;
 import org.apache.doris.analysis.StatementBase;
@@ -41,28 +48,42 @@ import org.apache.doris.catalog.Database;
 import org.apache.doris.catalog.DiskInfo;
 import org.apache.doris.catalog.Env;
 import org.apache.doris.catalog.OlapTable;
+import org.apache.doris.catalog.Replica;
 import org.apache.doris.catalog.Table;
-import org.apache.doris.cluster.ClusterNamespace;
+import org.apache.doris.catalog.TabletMeta;
 import org.apache.doris.common.AnalysisException;
 import org.apache.doris.common.Config;
 import org.apache.doris.common.DdlException;
 import org.apache.doris.common.FeConstants;
 import org.apache.doris.common.MetaNotFoundException;
 import org.apache.doris.common.util.SqlParserUtils;
+import org.apache.doris.datasource.CatalogIf;
+import org.apache.doris.job.base.AbstractJob;
 import org.apache.doris.nereids.CascadesContext;
 import org.apache.doris.nereids.StatementContext;
+import org.apache.doris.nereids.glue.LogicalPlanAdapter;
 import org.apache.doris.nereids.parser.NereidsParser;
-import org.apache.doris.nereids.trees.expressions.NamedExpressionUtil;
+import org.apache.doris.nereids.rules.RuleType;
+import org.apache.doris.nereids.trees.expressions.StatementScopeIdGenerator;
+import org.apache.doris.nereids.trees.plans.commands.AddConstraintCommand;
+import org.apache.doris.nereids.trees.plans.commands.CreateMTMVCommand;
+import org.apache.doris.nereids.trees.plans.commands.CreateTableCommand;
+import org.apache.doris.nereids.trees.plans.commands.DropConstraintCommand;
+import org.apache.doris.nereids.trees.plans.commands.DropMTMVCommand;
 import org.apache.doris.nereids.trees.plans.logical.LogicalPlan;
+import org.apache.doris.nereids.util.MemoTestUtils;
+import org.apache.doris.persist.CreateTableInfo;
+import org.apache.doris.persist.EditLog;
 import org.apache.doris.planner.Planner;
 import org.apache.doris.qe.ConnectContext;
+import org.apache.doris.qe.DdlExecutor;
 import org.apache.doris.qe.OriginStatement;
 import org.apache.doris.qe.QueryState;
+import org.apache.doris.qe.SessionVariable;
 import org.apache.doris.qe.ShowExecutor;
 import org.apache.doris.qe.ShowResultSet;
 import org.apache.doris.qe.StmtExecutor;
 import org.apache.doris.system.Backend;
-import org.apache.doris.system.SystemInfoService;
 import org.apache.doris.thrift.TNetworkAddress;
 import org.apache.doris.utframe.MockedBackendFactory.DefaultBeThriftServiceImpl;
 import org.apache.doris.utframe.MockedBackendFactory.DefaultHeartbeatServiceImpl;
@@ -73,8 +94,12 @@ import org.apache.doris.utframe.MockedFrontend.NotInitException;
 
 import com.google.common.base.Strings;
 import com.google.common.collect.ImmutableMap;
+import com.google.common.collect.ImmutableSet;
 import com.google.common.collect.Lists;
 import com.google.common.collect.Maps;
+import com.google.common.collect.Sets;
+import mockit.Mock;
+import mockit.MockUp;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.BeforeAll;
@@ -87,13 +112,14 @@ import java.io.StringReader;
 import java.net.DatagramSocket;
 import java.net.ServerSocket;
 import java.net.SocketException;
-import java.nio.channels.SocketChannel;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
+import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.UUID;
 
 /**
@@ -112,23 +138,44 @@ public abstract class TestWithFeService {
     protected String dorisHome;
     protected String runningDir = "fe/mocked/" + getClass().getSimpleName() + "/" + UUID.randomUUID() + "/";
     protected ConnectContext connectContext;
+    protected boolean needCleanDir = true;
+    protected int lastFeRpcPort = 0;
+    // make it default to enable_advance_next_id
+    protected boolean enableAdvanceNextId = Config.enable_advance_next_id;
 
-    protected static final String DEFAULT_CLUSTER_PREFIX = "default_cluster:";
+    protected static final String DEFAULT_CLUSTER_PREFIX = "";
+
+    private static final MockUp<SessionVariable> mockUp = new MockUp<SessionVariable>() {
+        @Mock
+        public Set<Integer> getEnableNereidsRules() {
+            return ImmutableSet.of();
+        }
+    };
 
     @BeforeAll
     public final void beforeAll() throws Exception {
+        // this.enableAdvanceNextId may be reset by children classes
+        Config.enable_advance_next_id = this.enableAdvanceNextId;
+        FeConstants.enableInternalSchemaDb = false;
+        FeConstants.shouldCreateInternalWorkloadGroup = false;
         beforeCreatingConnectContext();
         connectContext = createDefaultCtx();
+        beforeCluster();
         createDorisCluster();
         runBeforeAll();
+    }
+
+    protected void beforeCluster() {
     }
 
     @AfterAll
     public final void afterAll() throws Exception {
         runAfterAll();
         Env.getCurrentEnv().clear();
-        NamedExpressionUtil.clear();
-        cleanDorisFeDir();
+        StatementScopeIdGenerator.clear();
+        if (needCleanDir) {
+            cleanDorisFeDir();
+        }
     }
 
     @BeforeEach
@@ -149,8 +196,17 @@ public abstract class TestWithFeService {
     protected void runBeforeEach() throws Exception {
     }
 
+    // Override this method if you want to start multi BE
+    protected int backendNum() {
+        return 1;
+    }
+
+    protected boolean needDiffHost() {
+        return false;
+    }
+
     // Help to create a mocked ConnectContext.
-    protected ConnectContext createDefaultCtx() throws IOException {
+    public static ConnectContext createDefaultCtx() throws IOException {
         return createCtx(UserIdentity.ROOT, "127.0.0.1");
     }
 
@@ -160,27 +216,81 @@ public abstract class TestWithFeService {
         return statementContext;
     }
 
+    protected StatementContext createStatementCtx(String sql, ConnectContext ctx) {
+        StatementContext statementContext = new StatementContext(ctx, new OriginStatement(sql, 0));
+        ctx.setStatementContext(statementContext);
+        return statementContext;
+    }
+
+    protected  <T extends StatementBase> T createStmt(String showSql)
+            throws Exception {
+        return (T) parseAndAnalyzeStmt(showSql, connectContext);
+    }
+
     protected CascadesContext createCascadesContext(String sql) {
         StatementContext statementCtx = createStatementCtx(sql);
-        LogicalPlan initPlan = new NereidsParser().parseSingle(sql);
-        return CascadesContext.newContext(statementCtx, initPlan);
+        return MemoTestUtils.createCascadesContext(statementCtx, sql);
     }
 
-    public LogicalPlan analyze(String sql) {
+    protected CascadesContext createCascadesContext(String sql, ConnectContext ctx) {
+        StatementContext statementCtx = createStatementCtx(sql, ctx);
+        return MemoTestUtils.createCascadesContext(statementCtx, sql);
+    }
+
+    public LogicalPlan analyzeAndGetLogicalPlanByNereids(String sql) {
+        Set<String> originDisableRules = connectContext.getSessionVariable().getDisableNereidsRuleNames();
+        Set<String> disableRuleWithAuth = Sets.newHashSet(originDisableRules);
+        disableRuleWithAuth.add(RuleType.RELATION_AUTHENTICATION.name());
+        connectContext.getSessionVariable().setDisableNereidsRules(String.join(",", disableRuleWithAuth));
         CascadesContext cascadesContext = createCascadesContext(sql);
         cascadesContext.newAnalyzer().analyze();
-        return (LogicalPlan) cascadesContext.getMemo().copyOut();
+        connectContext.getSessionVariable().setDisableNereidsRules(String.join(",", originDisableRules));
+        cascadesContext.toMemo();
+        return (LogicalPlan) cascadesContext.getRewritePlan();
     }
 
-    protected ConnectContext createCtx(UserIdentity user, String host) throws IOException {
-        SocketChannel channel = SocketChannel.open();
-        ConnectContext ctx = new ConnectContext(channel);
-        ctx.setCluster(SystemInfoService.DEFAULT_CLUSTER);
+    public LogicalPlan analyzeAndGetLogicalPlanByNereids(String sql, ConnectContext ctx) {
+        Set<String> originDisableRules = ctx.getSessionVariable().getDisableNereidsRuleNames();
+        Set<String> disableRuleWithAuth = Sets.newHashSet(originDisableRules);
+        disableRuleWithAuth.add(RuleType.RELATION_AUTHENTICATION.name());
+        ctx.getSessionVariable().setDisableNereidsRules(String.join(",", disableRuleWithAuth));
+        CascadesContext cascadesContext = createCascadesContext(sql, ctx);
+        cascadesContext.newAnalyzer().analyze();
+        ctx.getSessionVariable().setDisableNereidsRules(String.join(",", originDisableRules));
+        cascadesContext.toMemo();
+        return (LogicalPlan) cascadesContext.getRewritePlan();
+    }
+
+    // Parse an origin stmt and analyze it by nereids. Return a StatementBase instance.
+    public StatementBase analyzeAndGetStmtByNereids(String sql) {
+        return analyzeAndGetStmtByNereids(sql, connectContext);
+    }
+
+    // Parse an origin stmt and analyze it by nereids. Return a StatementBase instance.
+    public StatementBase analyzeAndGetStmtByNereids(String sql, ConnectContext ctx) {
+        Set<String> originDisableRules = ctx.getSessionVariable().getDisableNereidsRuleNames();
+        Set<String> disableRuleWithAuth = Sets.newHashSet(originDisableRules);
+        disableRuleWithAuth.add(RuleType.RELATION_AUTHENTICATION.name());
+        ctx.getSessionVariable().setDisableNereidsRules(String.join(",", disableRuleWithAuth));
+        CascadesContext cascadesContext = createCascadesContext(sql, ctx);
+        cascadesContext.newAnalyzer().analyze();
+        ctx.getSessionVariable().setDisableNereidsRules(String.join(",", originDisableRules));
+        cascadesContext.toMemo();
+        LogicalPlan plan = (LogicalPlan) cascadesContext.getRewritePlan();
+        LogicalPlanAdapter adapter = new LogicalPlanAdapter(plan, cascadesContext.getStatementContext());
+        adapter.setViewDdlSqls(cascadesContext.getStatementContext().getViewDdlSqls());
+        cascadesContext.getStatementContext().setParsedStatement(adapter);
+        return adapter;
+    }
+
+    public static ConnectContext createCtx(UserIdentity user, String host) throws IOException {
+        ConnectContext ctx = new ConnectContext();
         ctx.setCurrentUserIdentity(user);
         ctx.setQualifiedUser(user.getQualifiedUser());
         ctx.setRemoteIP(host);
         ctx.setEnv(Env.getCurrentEnv());
         ctx.setThreadLocalInfo();
+        ctx.setStatementContext(new StatementContext());
         return ctx;
     }
 
@@ -248,6 +358,18 @@ public abstract class TestWithFeService {
     protected int startFEServer(String runningDir)
             throws EnvVarNotSetException, IOException, FeStartException, NotInitException, DdlException,
             InterruptedException {
+        IOException exception = null;
+        try {
+            return startFEServerWithoutRetry(runningDir);
+        } catch (IOException ignore) {
+            exception = ignore;
+        }
+        throw exception;
+    }
+
+    protected int startFEServerWithoutRetry(String runningDir)
+            throws EnvVarNotSetException, IOException, FeStartException, NotInitException, DdlException,
+            InterruptedException {
         // get DORIS_HOME
         dorisHome = System.getenv("DORIS_HOME");
         if (Strings.isNullOrEmpty(dorisHome)) {
@@ -257,34 +379,45 @@ public abstract class TestWithFeService {
         Config.plugin_dir = dorisHome + "/plugins";
         Config.custom_config_dir = dorisHome + "/conf";
         Config.edit_log_type = "local";
+        Config.disable_decimalv2 = false;
+        Config.disable_datev1 = false;
         File file = new File(Config.custom_config_dir);
         if (!file.exists()) {
             file.mkdir();
+        }
+        if (null != System.getenv("DORIS_HOME")) {
+            File metaDir = new File(Config.meta_dir);
+            if (!metaDir.exists()) {
+                metaDir.mkdir();
+            }
         }
         System.out.println("CREATE FE SERVER DIR: " + Config.custom_config_dir);
 
         int feHttpPort = findValidPort();
         int feRpcPort = findValidPort();
         int feQueryPort = findValidPort();
+        int arrowFlightSqlPort = findValidPort();
         int feEditLogPort = findValidPort();
         Map<String, String> feConfMap = Maps.newHashMap();
         // set additional fe config
         feConfMap.put("http_port", String.valueOf(feHttpPort));
         feConfMap.put("rpc_port", String.valueOf(feRpcPort));
         feConfMap.put("query_port", String.valueOf(feQueryPort));
+        feConfMap.put("arrow_flight_sql_port", String.valueOf(arrowFlightSqlPort));
         feConfMap.put("edit_log_port", String.valueOf(feEditLogPort));
         feConfMap.put("tablet_create_timeout_second", "10");
         // start fe in "DORIS_HOME/fe/mocked/"
         MockedFrontend frontend = new MockedFrontend();
         frontend.init(dorisHome + "/" + runningDir, feConfMap);
         frontend.start(new String[0]);
+        lastFeRpcPort = feRpcPort;
         return feRpcPort;
     }
 
     protected void createDorisCluster()
             throws InterruptedException, NotInitException, IOException, DdlException, EnvVarNotSetException,
             FeStartException {
-        createDorisCluster(runningDir, 1);
+        createDorisClusterWithMultiTag(runningDir, backendNum());
     }
 
     protected void createDorisCluster(String runningDir, int backendNum)
@@ -292,29 +425,16 @@ public abstract class TestWithFeService {
             InterruptedException {
         int feRpcPort = startFEServer(runningDir);
         List<Backend> bes = Lists.newArrayList();
-        System.out.println("start create backend");
+        System.out.println("start create backend, backend num " + backendNum);
         for (int i = 0; i < backendNum; i++) {
             bes.add(createBackend("127.0.0.1", feRpcPort));
         }
         System.out.println("after create backend");
-        checkBEHeartbeat(bes);
+        if (!checkBEHeartbeat(bes)) {
+            System.out.println("Some backends dead, all backends: " + bes);
+        }
         // Thread.sleep(2000);
         System.out.println("after create backend2");
-    }
-
-    private void checkBEHeartbeat(List<Backend> bes) throws InterruptedException {
-        int maxTry = 10;
-        boolean allAlive = false;
-        while (maxTry-- > 0 && !allAlive) {
-            Thread.sleep(1000);
-            boolean hasDead = false;
-            for (Backend be : bes) {
-                if (!be.isAlive()) {
-                    hasDead = true;
-                }
-            }
-            allAlive = !hasDead;
-        }
     }
 
     // Create multi backends with different host for unit test.
@@ -324,43 +444,97 @@ public abstract class TestWithFeService {
             InterruptedException {
         // set runningUnitTest to true, so that for ut, the agent task will be send to "127.0.0.1"
         // to make cluster running well.
-        FeConstants.runningUnitTest = true;
+        if (backendNum > 1) {
+            FeConstants.runningUnitTest = true;
+        }
         int feRpcPort = startFEServer(runningDir);
         List<Backend> bes = Lists.newArrayList();
+        System.out.println("start create backend, backend num " + backendNum);
         for (int i = 0; i < backendNum; i++) {
             String host = "127.0.0." + (i + 1);
             bes.add(createBackend(host, feRpcPort));
         }
-        checkBEHeartbeat(bes);
+        System.out.println("after create backend");
+        if (!checkBEHeartbeat(bes)) {
+            System.out.println("Some backends dead, all backends: " + bes);
+        }
+        System.out.println("after create backend2");
+    }
+
+    protected boolean checkBEHeartbeat(List<Backend> bes) {
+        return checkBEHeartbeatStatus(bes, true);
+    }
+
+    protected boolean checkBELostHeartbeat(List<Backend> bes) {
+        return checkBEHeartbeatStatus(bes, false);
+    }
+
+    private boolean checkBEHeartbeatStatus(List<Backend> bes, boolean isAlive) {
+        int maxTry = Config.heartbeat_interval_second + 2;
+        while (maxTry-- > 0) {
+            try {
+                Thread.sleep(1000);
+            } catch (InterruptedException e) {
+                // no exception
+            }
+            if (bes.stream().allMatch(be -> be.isAlive() == isAlive)) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    protected Backend addNewBackend() throws IOException, InterruptedException {
+        Backend be = createBackend("127.0.0.1", lastFeRpcPort);
+        checkBEHeartbeat(Lists.newArrayList(be));
+        return be;
     }
 
     protected Backend createBackend(String beHost, int feRpcPort) throws IOException, InterruptedException {
+        IOException exception = null;
+        for (int i = 0; i <= 3; i++) {
+            try {
+                return createBackendWithoutRetry(beHost, feRpcPort);
+            } catch (IOException ignore) {
+                exception = ignore;
+            }
+        }
+        throw exception;
+    }
+
+    private Backend createBackendWithoutRetry(String beHost, int feRpcPort) throws IOException, InterruptedException {
         int beHeartbeatPort = findValidPort();
         int beThriftPort = findValidPort();
         int beBrpcPort = findValidPort();
         int beHttpPort = findValidPort();
+        int beArrowFlightSqlPort = findValidPort();
 
         // start be
+        MockedBackendFactory.BeThriftService beThriftService = new DefaultBeThriftServiceImpl();
         MockedBackend backend = MockedBackendFactory.createBackend(beHost, beHeartbeatPort, beThriftPort, beBrpcPort,
-                beHttpPort, new DefaultHeartbeatServiceImpl(beThriftPort, beHttpPort, beBrpcPort),
-                new DefaultBeThriftServiceImpl(), new DefaultPBackendServiceImpl());
+                beHttpPort, beArrowFlightSqlPort, new DefaultHeartbeatServiceImpl(beThriftPort, beHttpPort, beBrpcPort, beArrowFlightSqlPort),
+                beThriftService, new DefaultPBackendServiceImpl());
         backend.setFeAddress(new TNetworkAddress("127.0.0.1", feRpcPort));
         backend.start();
 
         // add be
         Backend be = new Backend(Env.getCurrentEnv().getNextId(), backend.getHost(), backend.getHeartbeatPort());
         DiskInfo diskInfo1 = new DiskInfo("/path" + be.getId());
-        diskInfo1.setTotalCapacityB(1000000);
-        diskInfo1.setAvailableCapacityB(500000);
+        diskInfo1.setPathHash(be.getId());
+        diskInfo1.setTotalCapacityB(10L << 40);
+        diskInfo1.setAvailableCapacityB(5L << 40);
         diskInfo1.setDataUsedCapacityB(480000);
+        diskInfo1.setPathHash(be.getId());
         Map<String, DiskInfo> disks = Maps.newHashMap();
         disks.put(diskInfo1.getRootPath(), diskInfo1);
         be.setDisks(ImmutableMap.copyOf(disks));
         be.setAlive(false);
-        be.setOwnerClusterName(SystemInfoService.DEFAULT_CLUSTER);
         be.setBePort(beThriftPort);
         be.setHttpPort(beHttpPort);
         be.setBrpcPort(beBrpcPort);
+        be.setArrowFlightSqlPort(beArrowFlightSqlPort);
+        beThriftService.setBackendInFe(be);
         Env.getCurrentSystemInfo().addBackend(be);
         return be;
     }
@@ -369,13 +543,12 @@ public abstract class TestWithFeService {
         try {
             cleanDir(dorisHome + "/" + runningDir);
             cleanDir(Config.plugin_dir);
-            cleanDir(Config.custom_config_dir);
         } catch (IOException e) {
             e.printStackTrace();
         }
     }
 
-    protected int findValidPort() {
+    public static int findValidPort() {
         int port = 0;
         while (true) {
             try (ServerSocket socket = new ServerSocket(0)) {
@@ -399,16 +572,21 @@ public abstract class TestWithFeService {
     }
 
     public String getSQLPlanOrErrorMsg(String sql, boolean isVerbose) throws Exception {
-        connectContext.getState().reset();
-        StmtExecutor stmtExecutor = new StmtExecutor(connectContext, sql);
-        connectContext.setExecutor(stmtExecutor);
+        return getSQLPlanOrErrorMsg(connectContext, sql, isVerbose);
+    }
+
+    public String getSQLPlanOrErrorMsg(ConnectContext ctx, String sql, boolean isVerbose) throws Exception {
+        ctx.setThreadLocalInfo();
+        ctx.getState().reset();
+        StmtExecutor stmtExecutor = new StmtExecutor(ctx, sql);
+        ctx.setExecutor(stmtExecutor);
         ConnectContext.get().setExecutor(stmtExecutor);
         stmtExecutor.execute();
-        if (connectContext.getState().getStateType() != QueryState.MysqlStateType.ERR) {
+        if (ctx.getState().getStateType() != QueryState.MysqlStateType.ERR) {
             Planner planner = stmtExecutor.planner();
-            return planner.getExplainString(new ExplainOptions(isVerbose, false));
+            return planner.getExplainString(new ExplainOptions(isVerbose, false, false));
         } else {
-            return connectContext.getState().getErrorMessage();
+            return ctx.getState().getErrorMessage();
         }
     }
 
@@ -419,7 +597,8 @@ public abstract class TestWithFeService {
         if (connectContext.getState().getStateType() != QueryState.MysqlStateType.ERR) {
             return stmtExecutor.planner();
         } else {
-            return null;
+            throw new Exception(
+                    connectContext.getState().toString() + ", " + connectContext.getState().getErrorMessage());
         }
     }
 
@@ -427,9 +606,11 @@ public abstract class TestWithFeService {
         connectContext.getState().reset();
         StmtExecutor stmtExecutor = new StmtExecutor(connectContext, queryStr);
         stmtExecutor.execute();
-        if (connectContext.getState().getStateType() != QueryState.MysqlStateType.ERR) {
+        if (connectContext.getState().getStateType() != QueryState.MysqlStateType.ERR
+                && connectContext.getState().getErrorCode() == null) {
             return stmtExecutor;
         } else {
+            // throw new IllegalStateException(connectContext.getState().getErrorMessage());
             return null;
         }
     }
@@ -440,12 +621,40 @@ public abstract class TestWithFeService {
         Env.getCurrentEnv().createDb(createDbStmt);
     }
 
+    public void createDatabaseWithSql(String createDbSql) throws Exception {
+        CreateDbStmt createDbStmt = (CreateDbStmt) parseAndAnalyzeStmt(createDbSql);
+        Env.getCurrentEnv().createDb(createDbStmt);
+    }
+
+    public void dropDatabase(String db) throws Exception {
+        String createDbStmtStr = "DROP DATABASE " + db;
+        DropDbStmt createDbStmt = (DropDbStmt) parseAndAnalyzeStmt(createDbStmtStr);
+        Env.getCurrentEnv().dropDb(createDbStmt);
+    }
+
+    public void dropDatabaseWithSql(String dropDbSql) throws Exception {
+        DropDbStmt dropDbStmt = (DropDbStmt) parseAndAnalyzeStmt(dropDbSql);
+        Env.getCurrentEnv().dropDb(dropDbStmt);
+    }
+
     public void useDatabase(String dbName) {
-        connectContext.setDatabase(ClusterNamespace.getFullName(SystemInfoService.DEFAULT_CLUSTER, dbName));
+        connectContext.setDatabase(dbName);
     }
 
     protected ShowResultSet showCreateTable(String sql) throws Exception {
         ShowCreateTableStmt stmt = (ShowCreateTableStmt) parseAndAnalyzeStmt(sql);
+        ShowExecutor executor = new ShowExecutor(connectContext, stmt);
+        return executor.execute();
+    }
+
+    protected ShowResultSet showCreateFunction(String sql) throws Exception {
+        ShowCreateFunctionStmt stmt = (ShowCreateFunctionStmt) parseAndAnalyzeStmt(sql);
+        ShowExecutor executor = new ShowExecutor(connectContext, stmt);
+        return executor.execute();
+    }
+
+    protected ShowResultSet showFunctions(String sql) throws Exception {
+        ShowFunctionsStmt stmt = (ShowFunctionsStmt) parseAndAnalyzeStmt(sql);
         ShowExecutor executor = new ShowExecutor(connectContext, stmt);
         return executor.execute();
     }
@@ -457,7 +666,17 @@ public abstract class TestWithFeService {
     }
 
     public void createTable(String sql) throws Exception {
-        createTables(sql);
+        createTable(sql, false);
+    }
+
+    public void createTable(String sql, boolean enableNerieds) throws Exception {
+        try {
+            Config.enable_odbc_mysql_broker_table = true;
+            createTables(enableNerieds, sql);
+        } catch (Exception e) {
+            e.printStackTrace();
+            throw e;
+        }
     }
 
     public void dropTable(String table, boolean force) throws Exception {
@@ -466,16 +685,59 @@ public abstract class TestWithFeService {
         Env.getCurrentEnv().dropTable(dropTableStmt);
     }
 
+    public void dropTableWithSql(String dropTableSql) throws Exception {
+        DropTableStmt dropTableStmt = (DropTableStmt) parseAndAnalyzeStmt(dropTableSql);
+        Env.getCurrentEnv().dropTable(dropTableStmt);
+    }
+
+    public void recoverTable(String table) throws Exception {
+        RecoverTableStmt recoverTableStmt = (RecoverTableStmt) parseAndAnalyzeStmt(
+                "recover table " + table + ";", connectContext);
+        Env.getCurrentEnv().recoverTable(recoverTableStmt);
+    }
+
     public void createTableAsSelect(String sql) throws Exception {
         CreateTableAsSelectStmt createTableAsSelectStmt = (CreateTableAsSelectStmt) parseAndAnalyzeStmt(sql);
         Env.getCurrentEnv().createTableAsSelect(createTableAsSelectStmt);
     }
 
+    public void createCatalog(String sql) throws Exception {
+        CreateCatalogStmt stmt = (CreateCatalogStmt) parseAndAnalyzeStmt(sql, connectContext);
+        Env.getCurrentEnv().getCatalogMgr().createCatalog(stmt);
+    }
+
+    public CatalogIf getCatalog(String name) throws Exception {
+        return Env.getCurrentEnv().getCatalogMgr().getCatalog(name);
+    }
+
     public void createTables(String... sqls) throws Exception {
-        for (String sql : sqls) {
-            CreateTableStmt stmt = (CreateTableStmt) parseAndAnalyzeStmt(sql);
-            Env.getCurrentEnv().createTable(stmt);
+        createTables(false, sqls);
+    }
+
+    public void createTables(boolean enableNereids, String... sqls) throws Exception {
+        createTablesAndReturnPlans(enableNereids, sqls);
+    }
+
+    public List<LogicalPlan> createTablesAndReturnPlans(boolean enableNereids, String... sqls) throws Exception {
+        List<LogicalPlan> logicalPlans = new ArrayList<>();
+        if (enableNereids) {
+            for (String sql : sqls) {
+                NereidsParser nereidsParser = new NereidsParser();
+                LogicalPlan parsed = nereidsParser.parseSingle(sql);
+                logicalPlans.add(parsed);
+                StmtExecutor stmtExecutor = new StmtExecutor(connectContext, sql);
+                if (parsed instanceof CreateTableCommand) {
+                    ((CreateTableCommand) parsed).run(connectContext, stmtExecutor);
+                }
+            }
+        } else {
+            for (String sql : sqls) {
+                CreateTableStmt stmt = (CreateTableStmt) parseAndAnalyzeStmt(sql);
+                Env.getCurrentEnv().createTable(stmt);
+            }
         }
+        updateReplicaPathHash();
+        return logicalPlans;
     }
 
     public void createView(String sql) throws Exception {
@@ -486,6 +748,27 @@ public abstract class TestWithFeService {
     protected void createPolicy(String sql) throws Exception {
         CreatePolicyStmt createPolicyStmt = (CreatePolicyStmt) parseAndAnalyzeStmt(sql);
         Env.getCurrentEnv().getPolicyMgr().createPolicy(createPolicyStmt);
+    }
+
+    public void createFunction(String sql) throws Exception {
+        CreateFunctionStmt createFunctionStmt = (CreateFunctionStmt) parseAndAnalyzeStmt(sql);
+        Env.getCurrentEnv().createFunction(createFunctionStmt);
+    }
+
+    public void addConstraint(String sql) throws Exception {
+        LogicalPlan parsed = new NereidsParser().parseSingle(sql);
+        StmtExecutor stmtExecutor = new StmtExecutor(connectContext, sql);
+        if (parsed instanceof AddConstraintCommand) {
+            ((AddConstraintCommand) parsed).run(connectContext, stmtExecutor);
+        }
+    }
+
+    public void dropConstraint(String sql) throws Exception {
+        LogicalPlan parsed = new NereidsParser().parseSingle(sql);
+        StmtExecutor stmtExecutor = new StmtExecutor(connectContext, sql);
+        if (parsed instanceof DropConstraintCommand) {
+            ((DropConstraintCommand) parsed).run(connectContext, stmtExecutor);
+        }
     }
 
     protected void dropPolicy(String sql) throws Exception {
@@ -511,7 +794,8 @@ public abstract class TestWithFeService {
     protected void assertSQLPlanOrErrorMsgContains(String sql, String expect) throws Exception {
         // Note: adding `EXPLAIN` is necessary for non-query SQL, e.g., DDL, DML, etc.
         // TODO: Use a graceful way to get explain plan string, rather than modifying the SQL string.
-        Assertions.assertTrue(getSQLPlanOrErrorMsg("EXPLAIN " + sql).contains(expect));
+        Assertions.assertTrue(getSQLPlanOrErrorMsg("EXPLAIN " + sql).contains(expect),
+                getSQLPlanOrErrorMsg("EXPLAIN " + sql));
     }
 
     protected void assertSQLPlanOrErrorMsgContains(String sql, String... expects) throws Exception {
@@ -522,10 +806,20 @@ public abstract class TestWithFeService {
     }
 
     protected void useUser(String userName) throws AnalysisException {
-        UserIdentity user = new UserIdentity(userName, "%");
-        user.analyze(SystemInfoService.DEFAULT_CLUSTER);
+        useUser(userName, "%");
+    }
+
+    protected void useUser(String userName, String host) throws AnalysisException {
+        UserIdentity user = new UserIdentity(userName, host);
+        user.analyze();
         connectContext.setCurrentUserIdentity(user);
-        connectContext.setQualifiedUser(SystemInfoService.DEFAULT_CLUSTER + ":" + userName);
+        connectContext.setQualifiedUser(userName);
+    }
+
+    protected void addUser(String userName, boolean ifNotExists) throws Exception {
+        CreateUserStmt createUserStmt = (CreateUserStmt) UtFrameUtils.parseAndAnalyzeStmt(
+                "create user " + (ifNotExists ? "if not exists " : "") + userName + "@'%'", connectContext);
+        DdlExecutor.execute(Env.getCurrentEnv(), createUserStmt);
     }
 
     protected void addRollup(String sql) throws Exception {
@@ -536,6 +830,12 @@ public abstract class TestWithFeService {
         Thread.sleep(100);
     }
 
+    protected void alterTableSync(String sql) throws Exception {
+        AlterTableStmt alterTableStmt = (AlterTableStmt) UtFrameUtils.parseAndAnalyzeStmt(sql, connectContext);
+        Env.getCurrentEnv().alterTable(alterTableStmt);
+        Thread.sleep(100);
+    }
+
     protected void createMv(String sql) throws Exception {
         CreateMaterializedViewStmt createMaterializedViewStmt =
                 (CreateMaterializedViewStmt) UtFrameUtils.parseAndAnalyzeStmt(sql, connectContext);
@@ -543,6 +843,78 @@ public abstract class TestWithFeService {
         checkAlterJob();
         // waiting table state to normal
         Thread.sleep(100);
+    }
+
+    protected void createMvByNereids(String sql) throws Exception {
+        new MockUp<EditLog>() {
+            @Mock
+            public void logCreateTable(CreateTableInfo info) {
+                System.out.println("skip log create table...");
+            }
+
+            @Mock
+            public void logCreateJob(AbstractJob job) {
+                System.out.println("skip log create job...");
+            }
+        };
+        NereidsParser nereidsParser = new NereidsParser();
+        LogicalPlan parsed = nereidsParser.parseSingle(sql);
+        StmtExecutor stmtExecutor = new StmtExecutor(connectContext, sql);
+        if (parsed instanceof CreateMTMVCommand) {
+            ((CreateMTMVCommand) parsed).run(connectContext, stmtExecutor);
+        }
+        checkAlterJob();
+        // waiting table state to normal
+        Thread.sleep(1000);
+
+    }
+
+    protected void dropMvByNereids(String sql) throws Exception {
+        new MockUp<EditLog>() {
+            @Mock
+            public void logCreateTable(CreateTableInfo info) {
+                System.out.println("skip log create table...");
+            }
+
+            @Mock
+            public void logCreateJob(AbstractJob job) {
+                System.out.println("skip log create job...");
+            }
+        };
+        NereidsParser nereidsParser = new NereidsParser();
+        LogicalPlan parsed = nereidsParser.parseSingle(sql);
+        StmtExecutor stmtExecutor = new StmtExecutor(connectContext, sql);
+        if (parsed instanceof DropMTMVCommand) {
+            ((DropMTMVCommand) parsed).run(connectContext, stmtExecutor);
+        }
+        checkAlterJob();
+        // waiting table state to normal
+        Thread.sleep(1000);
+
+    }
+
+    private void updateReplicaPathHash() {
+        com.google.common.collect.Table<Long, Long, Replica> replicaMetaTable = Env.getCurrentInvertedIndex()
+                .getReplicaMetaTable();
+        for (com.google.common.collect.Table.Cell<Long, Long, Replica> cell : replicaMetaTable.cellSet()) {
+            long beId = cell.getColumnKey();
+            Backend be = Env.getCurrentSystemInfo().getBackend(beId);
+            if (be == null) {
+                continue;
+            }
+            Replica replica = cell.getValue();
+            TabletMeta tabletMeta = Env.getCurrentInvertedIndex().getTabletMeta(cell.getRowKey());
+            if (tabletMeta == null) {
+                continue;
+            }
+            ImmutableMap<String, DiskInfo> diskMap = be.getDisks();
+            for (DiskInfo diskInfo : diskMap.values()) {
+                if (diskInfo.getStorageMedium() == tabletMeta.getStorageMedium()) {
+                    replica.setPathHash(diskInfo.getPathHash());
+                    break;
+                }
+            }
+        }
     }
 
     private void checkAlterJob() throws InterruptedException {

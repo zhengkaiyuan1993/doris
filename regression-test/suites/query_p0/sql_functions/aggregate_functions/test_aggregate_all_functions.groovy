@@ -15,9 +15,8 @@
 // specific language governing permissions and limitations
 // under the License.
 
-suite("test_aggregate_all_functions") {
+suite("test_aggregate_all_functions", "arrow_flight_sql") {
 
-    sql "set enable_vectorized_engine = true"
     sql "set batch_size = 4096"
     
     // APPROX_COUNT_DISTINCT_ACTION
@@ -68,7 +67,7 @@ suite("test_aggregate_all_functions") {
 	CREATE TABLE IF NOT EXISTS ${tableName_03} (
 	 `dt` int(11) NULL COMMENT "",
 	 `page` varchar(10) NULL COMMENT "",
-	 `user_id` bitmap BITMAP_UNION NULL COMMENT ""
+	 `user_id` bitmap BITMAP_UNION  COMMENT ""
 	) ENGINE=OLAP
 	AGGREGATE KEY(`dt`, `page`)
 	COMMENT "OLAP"
@@ -84,7 +83,7 @@ suite("test_aggregate_all_functions") {
 	CREATE TABLE IF NOT EXISTS ${tableName_04} (
 	 `dt` int(11) NULL COMMENT "",
 	 `page` varchar(10) NULL COMMENT "",
-	 `user_id_bitmap` bitmap BITMAP_UNION NULL COMMENT "",
+	 `user_id_bitmap` bitmap BITMAP_UNION  COMMENT "",
 	 `user_id_int` int(11) REPLACE NULL COMMENT "",
 	 `user_id_str` string REPLACE NULL COMMENT ""
 	) ENGINE=OLAP
@@ -103,10 +102,6 @@ suite("test_aggregate_all_functions") {
     sql "insert into ${tableName_03} select dt,page,to_bitmap(user_id_int) user_id from ${tableName_04}"
     sql "insert into ${tableName_03} select dt,page,bitmap_hash(user_id_str) user_id from ${tableName_04}"
 
-    sql "set enable_vectorized_engine = false"
-    qt_bitmap_intersect "select dt, bitmap_to_string(bitmap_intersect(user_id_bitmap)) from ${tableName_04} group by dt order by dt"
-
-    sql "set enable_vectorized_engine = true"
     qt_bitmap_intersect "select dt, bitmap_to_string(bitmap_intersect(user_id_bitmap)) from ${tableName_04} group by dt order by dt"
 
     qt_select4 "select bitmap_union_count(user_id) from  ${tableName_03}"
@@ -242,8 +237,32 @@ suite("test_aggregate_all_functions") {
     qt_select18 "select id,MIN(level) from ${tableName_11} group by id order by id"
     qt_select19 "select MIN(level) from ${tableName_11}"
 
-    sql "DROP TABLE IF EXISTS ${tableName_11}"
 
+    sql "DROP TABLE IF EXISTS ${tableName_11}"
+    sql """
+        CREATE TABLE IF NOT EXISTS ${tableName_11} (
+          `k1` int(11) NULL,
+          `a1` int(11) NULL
+        ) ENGINE=OLAP
+        DUPLICATE KEY(`k1`)
+        COMMENT 'OLAP'
+        DISTRIBUTED BY HASH(`k1`) BUCKETS 10
+        PROPERTIES (
+        "replication_allocation" = "tag.location.default: 1",
+        "in_memory" = "false",
+        "storage_format" = "V2",
+        "disable_auto_compaction" = "false"
+        )
+        """
+    sql "INSERT INTO ${tableName_11} values(1,1),(2,2),(3,3),(4,null),(null,5)"
+
+    qt_select "select * from (select k1 from ${tableName_11} union select null) t order by k1"
+    qt_select "select * from (select k1,a1 from ${tableName_11} union select null,null) t order by k1, a1"
+
+    qt_select "select min(k1) from (select k1 from ${tableName_11} union select null) t"
+    qt_select "select min(k1) from (select k1,a1 from ${tableName_11} union select null,null) t"
+
+    sql "DROP TABLE IF EXISTS ${tableName_11}"
     
     // PERCENTILE
     def tableName_13 = "percentile"
@@ -264,6 +283,9 @@ suite("test_aggregate_all_functions") {
     qt_select20 "select id,percentile(level,0.5) from ${tableName_13} group by id order by id"
     qt_select21 "select id,percentile(level,0.55) from ${tableName_13} group by id order by id"
     qt_select22 "select id,percentile(level,0.805) from ${tableName_13} group by id order by id"
+    qt_select20_1 "select id,percentile(level + 0.1,0.5) from ${tableName_13} group by id order by id"
+    qt_select21_1 "select id,percentile(level + 0.1,0.55) from ${tableName_13} group by id order by id"
+    qt_select22_1 "select id,percentile(level + 0.1,0.805) from ${tableName_13} group by id order by id"
 
     sql "DROP TABLE IF EXISTS ${tableName_13}"
 
@@ -469,5 +491,54 @@ suite("test_aggregate_all_functions") {
        
     sql "DROP TABLE IF EXISTS ${tableName_10}"
 
-    qt_select44 """ select sum(distinct k1), sum(distinct k2), sum(distinct k3), sum(distinct cast(k4 as largeint)), sum(distinct k5), sum(distinct k8), sum(distinct k9) from test_query_db.test  """
+    qt_select44 """select sum(distinct k1), sum(distinct k2), sum(distinct k3), sum(distinct cast(k4 as largeint)), sum(distinct k5), sum(distinct k8), sum(distinct k9) from test_query_db.test  """
+
+    qt_select45 """select * from ${tableName_12} order by id,level"""
+
+    qt_select46 """select * from ${tableName_12} where id>=5 and id <=5 and level >10  order by id,level;"""
+
+    qt_select47 """select count(*) from ${tableName_12}"""
+
+    def tableName_21 = "quantile_state_agg_test"
+
+    sql "DROP TABLE IF EXISTS ${tableName_21}"
+
+    sql """
+        CREATE TABLE IF NOT EXISTS ${tableName_21} (
+        	 `dt` int(11) NULL COMMENT "",
+        	 `id` int(11) NULL COMMENT "",
+        	 `price` quantile_state QUANTILE_UNION NOT NULL COMMENT ""
+        	) ENGINE=OLAP
+        	AGGREGATE KEY(`dt`, `id`)
+        	COMMENT "OLAP"
+        	DISTRIBUTED BY HASH(`dt`) BUCKETS 1
+        	PROPERTIES (
+                  "replication_num" = "1"
+            );
+        """
+    sql """INSERT INTO ${tableName_21} values(20220201,0, to_quantile_state(1, 2048))"""
+    sql """INSERT INTO ${tableName_21} values(20220201,1, to_quantile_state(-1, 2048)),
+            (20220201,1, to_quantile_state(0, 2048)),(20220201,1, to_quantile_state(1, 2048)),
+            (20220201,1, to_quantile_state(2, 2048)),(20220201,1, to_quantile_state(3, 2048))
+        """
+
+    List rows = new ArrayList()
+    for (int i = 0; i < 5000; ++i) {
+        rows.add([20220202, 2 , i])
+    }
+    streamLoad {
+        table "${tableName_21}"
+        set 'label', UUID.randomUUID().toString()
+        set 'columns', 'dt, id, price, price=to_quantile_state(price, 2048)'
+        inputIterator rows.iterator()
+    }
+
+    sql "sync"
+
+    qt_select48 """select dt, id, quantile_percent(quantile_union(price), 0) from ${tableName_21} group by dt, id order by dt, id"""
+
+    qt_select49 """select dt, id, quantile_percent(quantile_union(price), 0.5) from ${tableName_21} group by dt, id order by dt, id"""
+    qt_select50 """select dt, id, quantile_percent(quantile_union(price), 1) from ${tableName_21} group by dt, id order by dt, id"""
+
+
 }

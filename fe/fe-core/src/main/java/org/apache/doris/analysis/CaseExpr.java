@@ -29,6 +29,7 @@ import org.apache.doris.thrift.TExprNodeType;
 import com.google.common.base.Preconditions;
 import com.google.common.base.Predicates;
 import com.google.common.collect.Lists;
+import com.google.gson.annotations.SerializedName;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -67,8 +68,14 @@ import java.util.Objects;
  *   END
  */
 public class CaseExpr extends Expr {
+    @SerializedName("hce")
     private boolean hasCaseExpr;
+    @SerializedName("hee")
     private boolean hasElseExpr;
+
+    private CaseExpr() {
+        // use for serde only
+    }
 
     public CaseExpr(Expr caseExpr, List<CaseWhenClause> whenClauses, Expr elseExpr) {
         super();
@@ -86,6 +93,16 @@ public class CaseExpr extends Expr {
             children.add(elseExpr);
             hasElseExpr = true;
         }
+    }
+
+    /**
+     * use for Nereids ONLY
+     */
+    public CaseExpr(List<CaseWhenClause> whenClauses, Expr elseExpr) {
+        this(null, whenClauses, elseExpr);
+        // nereids do not have CaseExpr, and nereids will unify the types,
+        // so just use the first then type
+        type = children.get(1).getType();
     }
 
     protected CaseExpr(CaseExpr other) {
@@ -154,11 +171,6 @@ public class CaseExpr extends Expr {
     }
 
     @Override
-    public boolean isVectorized() {
-        return false;
-    }
-
-    @Override
     protected void toThrift(TExprNode msg) {
         msg.node_type = TExprNodeType.CASE_EXPR;
         msg.case_expr = new TCaseExpr(hasCaseExpr, hasElseExpr);
@@ -186,6 +198,9 @@ public class CaseExpr extends Expr {
             caseExpr.analyze(analyzer);
             if (caseExpr instanceof Subquery && !caseExpr.getType().isScalarType()) {
                 throw new AnalysisException("Subquery in case-when must return scala type");
+            }
+            if (caseExpr.getType().isBitmapType()) {
+                throw new AnalysisException("Unsupported bitmap type in expression: " + toSql());
             }
             whenType = caseExpr.getType();
             lastCompatibleWhenExpr = children.get(0);
@@ -220,6 +235,9 @@ public class CaseExpr extends Expr {
             if (whenExpr.contains(Predicates.instanceOf(Subquery.class))
                     && !((hasCaseExpr() && whenExpr instanceof Subquery || !checkSubquery(whenExpr)))) {
                 throw new AnalysisException("Only support subquery in binary predicate in case statement.");
+            }
+            if (whenExpr.getType().isBitmapType()) {
+                throw new AnalysisException("Unsupported bitmap type in expression: " + toSql());
             }
             // Determine maximum compatible type of the then exprs seen so far.
             // We will add casts to them at the very end.
@@ -306,6 +324,11 @@ public class CaseExpr extends Expr {
     //      but for current LiteralExpr.compareLiteral, `123`' won't be regard as true
     //  the case which two values has different type left to be
     public static Expr computeCaseExpr(CaseExpr expr) {
+        if (expr.getType() == Type.NULL) {
+            // if expr's type is NULL_TYPE, means all possible return values are nulls
+            // it's safe to return null literal here
+            return new NullLiteral();
+        }
         LiteralExpr caseExpr;
         int startIndex = 0;
         int endIndex = expr.getChildren().size();
@@ -336,11 +359,7 @@ public class CaseExpr extends Expr {
         }
 
         if (caseExpr instanceof NullLiteral) {
-            if (expr.hasElseExpr) {
-                return expr.getChild(expr.getChildren().size() - 1);
-            } else {
-                return new NullLiteral();
-            }
+            return expr.getFinalResult();
         }
 
         if (expr.hasElseExpr) {
@@ -386,8 +405,12 @@ public class CaseExpr extends Expr {
             }
         }
 
-        if (expr.hasElseExpr) {
-            return expr.getChild(expr.getChildren().size() - 1);
+        return expr.getFinalResult();
+    }
+
+    public Expr getFinalResult() {
+        if (hasElseExpr) {
+            return getChild(getChildren().size() - 1);
         } else {
             return new NullLiteral();
         }
@@ -432,12 +455,5 @@ public class CaseExpr extends Expr {
             return true;
         }
         return false;
-    }
-
-    @Override
-    public void finalizeImplForNereids() throws AnalysisException {
-        // nereids do not have CaseExpr, and nereids will unify the types,
-        // so just use the first then type
-        type = children.get(1).getType();
     }
 }

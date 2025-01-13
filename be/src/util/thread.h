@@ -19,21 +19,20 @@
 // and modified by Doris
 
 #pragma once
-
-#ifndef __APPLE__
-#include <syscall.h>
-#endif
-
+#include <butil/macros.h>
 #include <pthread.h>
+#include <stdint.h>
 
-#include <atomic>
+#include <functional>
+#include <string>
+#include <utility>
 
 #include "common/status.h"
 #include "gutil/ref_counted.h"
-#include "http/web_page_handler.h"
 #include "util/countdown_latch.h"
 
 namespace doris {
+class WebPageHandler;
 
 class Thread : public RefCountedThreadSafe<Thread> {
 public:
@@ -94,6 +93,8 @@ public:
 
 #ifndef __APPLE__
     static void set_idle_sched();
+
+    static void set_thread_nice_value();
 #endif
 
     ~Thread();
@@ -278,7 +279,7 @@ private:
         kDefaultGiveUpAfterMs = -1 // forever
     };
 
-    Thread* _thread;
+    Thread* _thread = nullptr;
 
     int _warn_after_ms;
     int _warn_every_ms;

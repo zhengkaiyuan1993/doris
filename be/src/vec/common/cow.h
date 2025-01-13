@@ -22,6 +22,10 @@
 
 #include <atomic>
 #include <initializer_list>
+#include <type_traits>
+#include <vector>
+
+namespace doris {
 
 /** Copy-on-write shared ptr.
   * Allows to work with shared immutable objects and sometimes unshare and mutate you own unique copy.
@@ -139,19 +143,9 @@ protected:
             intrusive_ptr(rhs).swap(*this);
             return *this;
         }
-#if defined(__clang__)
-#pragma clang diagnostic push
-#pragma clang diagnostic ignored "-Wuninitialized"
-#elif defined(__GNUC__) || defined(__GNUG__)
-#pragma GCC diagnostic push
-#pragma GCC diagnostic ignored "-Wmaybe-uninitialized"
-#endif
+
         intrusive_ptr(intrusive_ptr&& rhs) : t(rhs.t) { rhs.t = nullptr; }
-#if defined(__clang__)
-#pragma clang diagnostic pop
-#elif defined(__GNUC__) || defined(__GNUG__)
-#pragma GCC diagnostic pop
-#endif
+
         intrusive_ptr& operator=(intrusive_ptr&& rhs) {
             intrusive_ptr(static_cast<intrusive_ptr&&>(rhs)).swap(*this);
             return *this;
@@ -209,10 +203,8 @@ protected:
 
         operator bool() const { return t != nullptr; }
 
-        operator T*() const { return t; }
-
     private:
-        T* t;
+        T* t = nullptr;
     };
 
 protected:
@@ -352,8 +344,8 @@ protected:
         operator const immutable_ptr<T>&() const { return value; }
         operator immutable_ptr<T>&() { return value; }
 
-        operator bool() const { return value != nullptr; }
-        bool operator!() const { return value == nullptr; }
+        operator bool() const { return value.get() != nullptr; }
+        bool operator!() const { return value.get() == nullptr; }
 
         bool operator==(const chameleon_ptr& rhs) const { return value == rhs.value; }
         bool operator!=(const chameleon_ptr& rhs) const { return value != rhs.value; }
@@ -401,9 +393,14 @@ public:
   *
   * See example in "cow_columns.cpp".
   */
+namespace vectorized {
+class IColumn;
+}
 template <typename Base, typename Derived>
 class COWHelper : public Base {
 public:
+    static_assert(std::is_base_of_v<doris::vectorized::IColumn, Base>,
+                  "COWHelper only use in IColumn");
     using Ptr = typename Base::template immutable_ptr<Derived>;
     using MutablePtr = typename Base::template mutable_ptr<Derived>;
 
@@ -415,9 +412,25 @@ public:
     typename Base::MutablePtr clone() const override {
         return typename Base::MutablePtr(new Derived(static_cast<const Derived&>(*this)));
     }
+    void append_data_by_selector(typename Base::MutablePtr& res,
+                                 const typename Base::Selector& selector) const override {
+        this->template append_data_by_selector_impl<Derived>(res, selector);
+    }
+
+    void append_data_by_selector(typename Base::MutablePtr& res,
+                                 const typename Base::Selector& selector, size_t begin,
+                                 size_t end) const override {
+        this->template append_data_by_selector_impl<Derived>(res, selector, begin, end);
+    }
+
+    void insert_from_multi_column(const std::vector<const vectorized::IColumn*>& srcs,
+                                  const std::vector<size_t>& positions) override {
+        this->template insert_from_multi_column_impl<Derived>(srcs, positions);
+    }
 
 protected:
     MutablePtr shallow_mutate() const {
         return MutablePtr(static_cast<Derived*>(Base::shallow_mutate().get()));
     }
 };
+} // namespace doris

@@ -16,13 +16,36 @@
 // under the License.
 
 #pragma once
-#include <queue>
+#include <gen_cpp/Metrics_types.h>
+#include <stddef.h>
+#include <stdint.h>
 
+#include <memory>
+#include <queue>
+#include <utility>
+#include <vector>
+
+#include "common/status.h"
+#include "util/runtime_profile.h"
 #include "vec/common/sort/sorter.h"
+#include "vec/core/block.h"
+#include "vec/core/field.h"
+#include "vec/core/sort_cursor.h"
+
+namespace doris {
+class ObjectPool;
+class RowDescriptor;
+class RuntimeState;
+namespace vectorized {
+class VSortExecExprs;
+} // namespace vectorized
+} // namespace doris
 
 namespace doris::vectorized {
 
 class SortingHeap {
+    ENABLE_FACTORY_CREATOR(SortingHeap);
+
 public:
     const HeapSortCursorImpl& top() { return _queue.top(); }
 
@@ -50,6 +73,8 @@ private:
 };
 
 class HeapSorter final : public Sorter {
+    ENABLE_FACTORY_CREATOR(HeapSorter);
+
 public:
     HeapSorter(VSortExecExprs& vsort_exec_exprs, int limit, int64_t offset, ObjectPool* pool,
                std::vector<bool>& is_asc_order, std::vector<bool>& nulls_first,
@@ -69,6 +94,10 @@ public:
 
     Status get_next(RuntimeState* state, Block* block, bool* eos) override;
 
+    size_t data_size() const override;
+
+    Field get_top_value() override;
+
     static constexpr size_t HEAP_SORT_THRESHOLD = 1024;
 
 private:
@@ -76,6 +105,7 @@ private:
 
     Status _prepare_sort_descs(Block* block);
 
+    size_t _data_size;
     size_t _heap_size;
     std::unique_ptr<SortingHeap> _heap;
     Block _return_block;

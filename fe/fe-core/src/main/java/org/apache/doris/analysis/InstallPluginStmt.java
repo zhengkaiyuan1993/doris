@@ -29,7 +29,7 @@ import org.apache.doris.qe.ConnectContext;
 
 import java.util.Map;
 
-public class InstallPluginStmt extends DdlStmt {
+public class InstallPluginStmt extends DdlStmt implements NotFallbackInParser {
 
     private String pluginPath;
     private Map<String, String> properties;
@@ -61,7 +61,7 @@ public class InstallPluginStmt extends DdlStmt {
         }
 
         // check operation privilege
-        if (!Env.getCurrentEnv().getAuth().checkGlobalPriv(ConnectContext.get(), PrivPredicate.ADMIN)) {
+        if (!Env.getCurrentEnv().getAccessManager().checkGlobalPriv(ConnectContext.get(), PrivPredicate.ADMIN)) {
             ErrorReport.reportAnalysisException(ErrorCode.ERR_SPECIFIC_ACCESS_DENIED_ERROR, "ADMIN");
         }
     }
@@ -86,5 +86,10 @@ public class InstallPluginStmt extends DdlStmt {
     @Override
     public RedirectStatus getRedirectStatus() {
         return RedirectStatus.FORWARD_WITH_SYNC;
+    }
+
+    @Override
+    public StmtType stmtType() {
+        return StmtType.INSTALL;
     }
 }

@@ -18,14 +18,22 @@
 package org.apache.doris.catalog;
 
 import org.apache.doris.common.AnalysisException;
+import org.apache.doris.common.DdlException;
 import org.apache.doris.common.ExceptionChecker;
 import org.apache.doris.common.FeConstants;
+import org.apache.doris.common.Pair;
 import org.apache.doris.common.util.PropertyAnalyzer;
 import org.apache.doris.meta.MetaContext;
 import org.apache.doris.resource.Tag;
+import org.apache.doris.system.SystemInfoService;
+import org.apache.doris.thrift.TStorageMedium;
 
 import com.google.common.collect.Maps;
+import mockit.Delegate;
+import mockit.Expectations;
+import mockit.Mocked;
 import org.junit.Assert;
+import org.junit.Before;
 import org.junit.Test;
 
 import java.io.DataInputStream;
@@ -34,16 +42,35 @@ import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
+import java.util.List;
 import java.util.Map;
 
 public class ReplicaAllocationTest {
+    @Mocked
+    SystemInfoService systemInfoService;
+
+    @Before
+    public void setUp() throws DdlException {
+        new Expectations() {
+            {
+                systemInfoService.selectBackendIdsForReplicaCreation((ReplicaAllocation) any, Maps.newHashMap(),
+                        (TStorageMedium) any, false, true);
+                minTimes = 0;
+                result = new Delegate() {
+                    Pair<Map<Tag, List<Long>>, TStorageMedium> selectBackendIdsForReplicaCreation() {
+                        return Pair.of(Maps.newHashMap(), TStorageMedium.HDD);
+                    }
+                };
+            }
+        };
+    }
 
     @Test
     public void testNormal() throws AnalysisException {
         // DEFAULT_ALLOCATION
         ReplicaAllocation replicaAlloc = ReplicaAllocation.DEFAULT_ALLOCATION;
         Assert.assertFalse(replicaAlloc.isNotSet());
-        Assert.assertTrue(replicaAlloc.equals(ReplicaAllocation.DEFAULT_ALLOCATION));
+        Assert.assertEquals(replicaAlloc, ReplicaAllocation.DEFAULT_ALLOCATION);
         Assert.assertFalse(replicaAlloc.isEmpty());
         Assert.assertEquals(3, replicaAlloc.getTotalReplicaNum());
         Assert.assertEquals("tag.location.default: 3", replicaAlloc.toCreateStmt());
@@ -51,7 +78,7 @@ public class ReplicaAllocationTest {
         // NOT SET
         replicaAlloc = ReplicaAllocation.NOT_SET;
         Assert.assertTrue(replicaAlloc.isNotSet());
-        Assert.assertFalse(replicaAlloc.equals(ReplicaAllocation.DEFAULT_ALLOCATION));
+        Assert.assertNotEquals(replicaAlloc, ReplicaAllocation.DEFAULT_ALLOCATION);
         Assert.assertTrue(replicaAlloc.isEmpty());
         Assert.assertEquals(0, replicaAlloc.getTotalReplicaNum());
         Assert.assertEquals("", replicaAlloc.toCreateStmt());
@@ -59,7 +86,7 @@ public class ReplicaAllocationTest {
         // set replica num
         replicaAlloc = new ReplicaAllocation((short) 5);
         Assert.assertFalse(replicaAlloc.isNotSet());
-        Assert.assertFalse(replicaAlloc.equals(ReplicaAllocation.DEFAULT_ALLOCATION));
+        Assert.assertNotEquals(replicaAlloc, ReplicaAllocation.DEFAULT_ALLOCATION);
         Assert.assertFalse(replicaAlloc.isEmpty());
         Assert.assertEquals(5, replicaAlloc.getTotalReplicaNum());
         Assert.assertEquals("tag.location.default: 5", replicaAlloc.toCreateStmt());

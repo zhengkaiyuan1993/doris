@@ -17,7 +17,7 @@
 
 package org.apache.doris.load;
 
-import org.apache.doris.PaloFe;
+import org.apache.doris.DorisFE;
 import org.apache.doris.common.Config;
 import org.apache.doris.common.FeConstants;
 import org.apache.doris.common.LoadException;
@@ -32,7 +32,7 @@ import com.google.common.base.Strings;
 import com.google.common.collect.Lists;
 import com.google.common.collect.Maps;
 import com.google.gson.Gson;
-import org.apache.commons.lang.StringUtils;
+import org.apache.commons.lang3.StringUtils;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 
@@ -53,11 +53,11 @@ import java.util.concurrent.ConcurrentMap;
 public class DppScheduler {
     private static final Logger LOG = LogManager.getLogger(DppScheduler.class);
 
-    private static final String HADOOP_CLIENT = PaloFe.DORIS_HOME_DIR + Config.dpp_hadoop_client_path;
+    private static final String HADOOP_CLIENT = DorisFE.DORIS_HOME_DIR + Config.dpp_hadoop_client_path;
     private static final String DPP_OUTPUT_DIR = "export";
-    private static final String JOB_CONFIG_DIR = PaloFe.DORIS_HOME_DIR + "/temp/job_conf";
+    private static final String JOB_CONFIG_DIR = DorisFE.DORIS_HOME_DIR + "/temp/job_conf";
     private static final String JOB_CONFIG_FILE = "jobconfig.json";
-    private static final String LOCAL_DPP_DIR = PaloFe.DORIS_HOME_DIR + "/lib/dpp/" + FeConstants.dpp_version;
+    private static final String LOCAL_DPP_DIR = DorisFE.DORIS_HOME_DIR + "/lib/dpp/" + FeConstants.dpp_version;
     private static final int DEFAULT_REDUCE_NUM = 1000;
     private static final long GB = 1024 * 1024 * 1024L;
 
@@ -206,9 +206,10 @@ public class DppScheduler {
         List<String> hadoopRunCmdList = Util.shellSplit(hadoopRunCmd);
         String[] hadoopRunCmds = hadoopRunCmdList.toArray(new String[0]);
         BufferedReader errorReader = null;
+        Process p = null;
         long startTime = System.currentTimeMillis();
         try {
-            Process p = Runtime.getRuntime().exec(hadoopRunCmds);
+            p = Runtime.getRuntime().exec(hadoopRunCmds);
             errorReader = new BufferedReader(new InputStreamReader(p.getErrorStream()));
             for (int i = 0; i < 1000; i++) {
                 outputLine = errorReader.readLine();
@@ -226,7 +227,6 @@ public class DppScheduler {
                 if (outputLine.indexOf("Running job") != -1) {
                     String[] arr = outputLine.split(":");
                     etlJobId = arr[arr.length - 1].trim();
-                    p.destroy();
                     break;
                 }
             }
@@ -239,6 +239,9 @@ public class DppScheduler {
             Util.deleteDirectory(configDir);
             long endTime = System.currentTimeMillis();
             LOG.info("finished submit hadoop job: {}. cost: {} ms", jobId, endTime - startTime);
+            if (p != null) {
+                p.destroy();
+            }
             if (errorReader != null) {
                 try {
                     errorReader.close();
@@ -385,7 +388,7 @@ public class DppScheduler {
         }
 
         // check input size limit
-        int inputSizeLimitGB = Config.load_input_size_limit_gb;
+        int inputSizeLimitGB = 0;
         if (inputSizeLimitGB != 0) {
             if (totalSizeB > inputSizeLimitGB * GB) {
                 String failMsg = "Input file size[" + (float) totalSizeB / GB + "GB]"
@@ -552,7 +555,7 @@ public class DppScheduler {
         return String.format(ETL_OUTPUT_PATH, fsDefaultName, outputPath, dbId, loadLabel, etlOutputDir);
     }
 
-    private class InputSizeInvalidException extends LoadException {
+    private static class InputSizeInvalidException extends LoadException {
         public InputSizeInvalidException(String msg) {
             super(msg);
         }

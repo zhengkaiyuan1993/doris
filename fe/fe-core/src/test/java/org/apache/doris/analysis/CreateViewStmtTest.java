@@ -19,6 +19,7 @@ package org.apache.doris.analysis;
 
 import org.apache.doris.common.AnalysisException;
 import org.apache.doris.common.ExceptionChecker;
+import org.apache.doris.common.FeNameFormat;
 import org.apache.doris.utframe.TestWithFeService;
 
 import org.junit.jupiter.api.Test;
@@ -39,10 +40,10 @@ public class CreateViewStmtTest extends TestWithFeService {
 
     @Test
     public void testCreateView() throws Exception {
-        connectContext.setDatabase("default_cluster:test");
+        connectContext.setDatabase("test");
         String createViewStr1 = "create view 1view1 as select k1,k2 from test.table1;";
         ExceptionChecker.expectThrowsWithMsg(AnalysisException.class,
-                "Incorrect table name '1view1'. Table name regex is '^[a-zA-Z][a-zA-Z0-9_]*$'",
+                String.format("Incorrect table name '1view1'. Table name regex is '%s'", FeNameFormat.getTableNameRegex()),
                 () -> parseAndAnalyzeStmt(createViewStr1, connectContext));
 
         String createViewStr2 = "create view view2 as select k1,k2 from test.table1;";

@@ -15,6 +15,7 @@
 // specific language governing permissions and limitations
 // under the License.
 suite("test_rollup_agg") {
+
     def tbName = "test_rollup_agg"
 
     def getJobRollupState = { tableName ->
@@ -41,7 +42,9 @@ suite("test_rollup_agg") {
     int max_try_secs = 60
     while (max_try_secs--) {
         String res = getJobRollupState(tbName)
-        if (res == "FINISHED") {
+        if (res == "FINISHED" || res == "CANCELLED") {
+            assertEquals("FINISHED", res)
+            sleep(3000)
             break
         } else {
             Thread.sleep(2000)
@@ -51,12 +54,14 @@ suite("test_rollup_agg") {
             }
         }
     }
-    Thread.sleep(200)
+    Thread.sleep(2000)
     sql "ALTER TABLE ${tbName} ADD COLUMN vv BIGINT SUM NULL DEFAULT '0' TO rollup_city;"
     max_try_secs = 60
     while (max_try_secs--) {
         String res = getJobColumnState(tbName)
-        if (res == "FINISHED") {
+        if (res == "FINISHED" || res == "CANCELLED") {
+            assertEquals("FINISHED", res)
+            sleep(3000)
             break
         } else {
             Thread.sleep(2000)
@@ -69,7 +74,16 @@ suite("test_rollup_agg") {
     sql "SHOW ALTER TABLE ROLLUP WHERE TableName='${tbName}';"
     qt_sql "DESC ${tbName} ALL;"
     sql "insert into ${tbName} values(1, 1, 'test1', 100,100,100);"
+    sql "insert into ${tbName} values(3, 1, 'test1', 100,100,100);"
     sql "insert into ${tbName} values(2, 1, 'test2', 100,100,100);"
+
+    sql "analyze table ${tbName} with sync;"
+    sql """set enable_stats=false;"""
+    explain {
+        sql("SELECT citycode,SUM(pv) FROM ${tbName} GROUP BY citycode")
+        contains("(rollup_city)")
+    }
+    sql """set enable_stats=true;"""
     explain {
         sql("SELECT citycode,SUM(pv) FROM ${tbName} GROUP BY citycode")
         contains("(rollup_city)")

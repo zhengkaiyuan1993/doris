@@ -27,7 +27,7 @@ import org.apache.doris.qe.ConnectContext;
 
 import java.util.Map;
 
-public class CreateRepositoryStmt extends DdlStmt {
+public class CreateRepositoryStmt extends DdlStmt implements NotFallbackInParser {
     private boolean isReadOnly;
     private String name;
     private StorageBackend storage;
@@ -47,11 +47,11 @@ public class CreateRepositoryStmt extends DdlStmt {
     }
 
     public String getBrokerName() {
-        return storage.getStorageName();
+        return storage.getStorageDesc().getName();
     }
 
     public StorageBackend.StorageType getStorageType() {
-        return storage.getStorageType();
+        return storage.getStorageDesc().getStorageType();
     }
 
     public String getLocation() {
@@ -59,7 +59,7 @@ public class CreateRepositoryStmt extends DdlStmt {
     }
 
     public Map<String, String> getProperties() {
-        return storage.getProperties();
+        return storage.getStorageDesc().getProperties();
     }
 
     @Override
@@ -67,7 +67,7 @@ public class CreateRepositoryStmt extends DdlStmt {
         super.analyze(analyzer);
         storage.analyze(analyzer);
         // check auth
-        if (!Env.getCurrentEnv().getAuth().checkGlobalPriv(ConnectContext.get(), PrivPredicate.ADMIN)) {
+        if (!Env.getCurrentEnv().getAccessManager().checkGlobalPriv(ConnectContext.get(), PrivPredicate.ADMIN)) {
             ErrorReport.reportAnalysisException(ErrorCode.ERR_SPECIFIC_ACCESS_DENIED_ERROR, "ADMIN");
         }
         FeNameFormat.checkCommonName("repository", name);
@@ -82,5 +82,15 @@ public class CreateRepositoryStmt extends DdlStmt {
         }
         sb.append("REPOSITORY `").append(name).append("` WITH ").append(storage.toSql());
         return sb.toString();
+    }
+
+    @Override
+    public boolean needAuditEncryption() {
+        return true;
+    }
+
+    @Override
+    public StmtType stmtType() {
+        return StmtType.CREATE;
     }
 }

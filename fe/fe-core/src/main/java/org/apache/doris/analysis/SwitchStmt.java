@@ -25,7 +25,7 @@ import org.apache.doris.common.util.Util;
 import org.apache.doris.mysql.privilege.PrivPredicate;
 import org.apache.doris.qe.ConnectContext;
 
-public class SwitchStmt extends StatementBase {
+public class SwitchStmt extends StatementBase implements NotFallbackInParser {
     private final String catalogName;
 
     public SwitchStmt(String catalogName) {
@@ -51,7 +51,7 @@ public class SwitchStmt extends StatementBase {
 
         Util.checkCatalogAllRules(catalogName);
 
-        if (!Env.getCurrentEnv().getAuth().checkCtlPriv(
+        if (!Env.getCurrentEnv().getAccessManager().checkCtlPriv(
                 ConnectContext.get(), catalogName, PrivPredicate.SHOW)) {
             ErrorReport.reportAnalysisException(
                     ErrorCode.ERR_CATALOG_ACCESS_DENIED, analyzer.getQualifiedUser(), catalogName);
@@ -61,5 +61,10 @@ public class SwitchStmt extends StatementBase {
     @Override
     public RedirectStatus getRedirectStatus() {
         return RedirectStatus.NO_FORWARD;
+    }
+
+    @Override
+    public StmtType stmtType() {
+        return StmtType.SWITCH;
     }
 }

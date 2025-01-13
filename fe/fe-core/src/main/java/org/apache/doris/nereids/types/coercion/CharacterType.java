@@ -24,13 +24,15 @@ import org.apache.doris.nereids.types.StringType;
 /**
  * Abstract type for all characters type in Nereids.
  */
-public class CharacterType extends PrimitiveType {
-
-    public static final CharacterType INSTANCE = new CharacterType(-1);
+public abstract class CharacterType extends PrimitiveType {
 
     private static final int WIDTH = 16;
+    public static final int DEFAULT_WIDTH = WIDTH;
 
     protected final int len;
+
+    // When defining SQL schemas, users often tend to set the length of string
+    // fields much longer than actually needed for storage.
 
     public CharacterType(int len) {
         this.len = len;
@@ -58,5 +60,9 @@ public class CharacterType extends PrimitiveType {
     @Override
     public int width() {
         return WIDTH;
+    }
+
+    public boolean isLengthSet() {
+        return len > 0;
     }
 }

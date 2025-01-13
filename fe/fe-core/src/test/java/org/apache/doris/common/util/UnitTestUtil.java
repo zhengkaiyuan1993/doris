@@ -60,6 +60,7 @@ import java.util.Map;
 public class UnitTestUtil {
     public static final String DB_NAME = "testDb";
     public static final String TABLE_NAME = "testTable";
+    public static final String MV_NAME = "testMv";
     public static final String PARTITION_NAME = "testTable";
     public static final int SCHEMA_HASH = 0;
 
@@ -109,9 +110,10 @@ public class UnitTestUtil {
 
         // table
         PartitionInfo partitionInfo = new SinglePartitionInfo();
-        partitionInfo.setDataProperty(partitionId, DataProperty.DEFAULT_DATA_PROPERTY);
+        partitionInfo.setDataProperty(partitionId, new DataProperty(DataProperty.DEFAULT_STORAGE_MEDIUM));
         partitionInfo.setReplicaAllocation(partitionId, new ReplicaAllocation((short) 3));
         partitionInfo.setIsInMemory(partitionId, false);
+        partitionInfo.setIsMutable(partitionId, true);
         partitionInfo.setTabletType(partitionId, TTabletType.TABLET_TYPE_DISK);
         OlapTable table = new OlapTable(tableId, TABLE_NAME, columns,
                                         KeysType.AGG_KEYS, partitionInfo, distributionInfo);
@@ -122,7 +124,7 @@ public class UnitTestUtil {
 
         // db
         Database db = new Database(dbId, DB_NAME);
-        db.createTable(table);
+        db.registerTable(table);
         return db;
     }
 

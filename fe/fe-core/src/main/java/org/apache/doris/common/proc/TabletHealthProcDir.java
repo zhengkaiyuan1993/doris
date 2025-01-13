@@ -17,6 +17,7 @@
 
 package org.apache.doris.common.proc;
 
+import org.apache.doris.catalog.ColocateGroupSchema;
 import org.apache.doris.catalog.ColocateTableIndex;
 import org.apache.doris.catalog.DatabaseIf;
 import org.apache.doris.catalog.Env;
@@ -28,10 +29,9 @@ import org.apache.doris.catalog.ReplicaAllocation;
 import org.apache.doris.catalog.Table;
 import org.apache.doris.catalog.TableIf;
 import org.apache.doris.catalog.Tablet;
-import org.apache.doris.clone.TabletSchedCtx;
 import org.apache.doris.common.AnalysisException;
 import org.apache.doris.common.Config;
-import org.apache.doris.common.Pair;
+import org.apache.doris.rpc.RpcException;
 import org.apache.doris.system.SystemInfoService;
 import org.apache.doris.task.AgentTask;
 import org.apache.doris.task.AgentTaskQueue;
@@ -39,6 +39,7 @@ import org.apache.doris.thrift.TTaskType;
 
 import com.google.common.base.Preconditions;
 import com.google.common.collect.ImmutableList;
+import com.google.common.collect.Lists;
 
 import java.util.ArrayList;
 import java.util.Comparator;
@@ -46,6 +47,7 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Objects;
 import java.util.Set;
+import java.util.concurrent.ForkJoinPool;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
@@ -57,13 +59,15 @@ public class TabletHealthProcDir implements ProcDirInterface {
     public static final ImmutableList<String> TITLE_NAMES = new ImmutableList.Builder<String>()
             .add("DbId").add("DbName").add("TabletNum").add("HealthyNum").add("ReplicaMissingNum")
             .add("VersionIncompleteNum").add("ReplicaRelocatingNum").add("RedundantNum")
-            .add("ReplicaMissingInClusterNum").add("ReplicaMissingForTagNum")
+            .add("ReplicaMissingForTagNum")
             .add("ForceRedundantNum").add("ColocateMismatchNum").add("ColocateRedundantNum")
             .add("NeedFurtherRepairNum").add("UnrecoverableNum").add("ReplicaCompactionTooSlowNum")
             .add("InconsistentNum").add("OversizeNum").add("CloningNum")
             .build();
 
     private Env env;
+
+    private static ForkJoinPool taskPool = new ForkJoinPool();
 
     public TabletHealthProcDir(Env env) {
         Preconditions.checkNotNull(env);
@@ -87,12 +91,14 @@ public class TabletHealthProcDir implements ProcDirInterface {
 
     @Override
     public ProcResult fetchResult() throws AnalysisException {
-        List<DBTabletStatistic> statistics = env.getInternalCatalog().getDbIds().parallelStream()
-                // skip information_schema database
-                .flatMap(id -> Stream.of(id == 0 ? null : env.getInternalCatalog().getDbNullable(id)))
-                .filter(Objects::nonNull).map(DBTabletStatistic::new)
-                // sort by dbName
-                .sorted(Comparator.comparing(db -> db.db.getFullName())).collect(Collectors.toList());
+        List<DBTabletStatistic> statistics = taskPool.submit(() ->
+                env.getInternalCatalog().getDbIds().parallelStream()
+                    // skip information_schema database
+                    .flatMap(id -> Stream.of(id == 0 ? null : env.getInternalCatalog().getDbNullable(id)))
+                    .filter(Objects::nonNull).map(DBTabletStatistic::new)
+                    // sort by dbName
+                    .sorted(Comparator.comparing(db -> db.db.getFullName())).collect(Collectors.toList())
+        ).join();
 
         List<List<String>> rows = new ArrayList<>(statistics.size() + 1);
         for (DBTabletStatistic statistic : statistics) {
@@ -112,7 +118,6 @@ public class TabletHealthProcDir implements ProcDirInterface {
         int versionIncompleteNum;
         int replicaRelocatingNum;
         int redundantNum;
-        int replicaMissingInClusterNum;
         int replicaMissingForTagNum;
         int forceRedundantNum;
         int colocateMismatchNum;
@@ -128,7 +133,6 @@ public class TabletHealthProcDir implements ProcDirInterface {
         Set<Long> versionIncompleteTabletIds;
         Set<Long> replicaRelocatingTabletIds;
         Set<Long> redundantTabletIds;
-        Set<Long> replicaMissingInClusterTabletIds;
         Set<Long> replicaMissingForTagTabletIds;
         Set<Long> forceRedundantTabletIds;
         Set<Long> colocateMismatchTabletIds;
@@ -153,7 +157,6 @@ public class TabletHealthProcDir implements ProcDirInterface {
             this.versionIncompleteTabletIds = new HashSet<>();
             this.replicaRelocatingTabletIds = new HashSet<>();
             this.redundantTabletIds = new HashSet<>();
-            this.replicaMissingInClusterTabletIds = new HashSet<>();
             this.replicaMissingForTagTabletIds = new HashSet<>();
             this.forceRedundantTabletIds = new HashSet<>();
             this.colocateMismatchTabletIds = new HashSet<>();
@@ -167,7 +170,7 @@ public class TabletHealthProcDir implements ProcDirInterface {
 
             SystemInfoService infoService = Env.getCurrentSystemInfo();
             ColocateTableIndex colocateTableIndex = Env.getCurrentColocateIndex();
-            List<Long> aliveBeIdsInCluster = infoService.getClusterBackendIds(SystemInfoService.DEFAULT_CLUSTER, true);
+            List<Long> aliveBeIds = infoService.getAllBackendIds(true);
             this.cloningTabletIds = AgentTaskQueue.getTask(db.getId(), TTaskType.CLONE)
                     .stream().map(AgentTask::getTabletId).collect(Collectors.toSet());
             this.cloningNum = cloningTabletIds.size();
@@ -177,7 +180,16 @@ public class TabletHealthProcDir implements ProcDirInterface {
                         ? colocateTableIndex.getGroup(olapTable.getId()) : null;
                 olapTable.readLock();
                 try {
-                    for (Partition partition : olapTable.getAllPartitions()) {
+                    List<Partition> partitions = Lists.newArrayList(olapTable.getAllPartitions());
+                    List<Long> visibleVersions = null;
+                    try {
+                        visibleVersions = Partition.getVisibleVersions(partitions);
+                    } catch (RpcException e) {
+                        throw new RuntimeException("get version from meta service failed:" + e.getMessage());
+                    }
+                    for (int j = 0; j < partitions.size(); j++) {
+                        Partition partition = partitions.get(j);
+                        long visibleVersion = visibleVersions.get(j);
                         ReplicaAllocation replicaAlloc = olapTable.getPartitionInfo()
                                 .getReplicaAllocation(partition.getId());
                         for (MaterializedIndex materializedIndex : partition.getMaterializedIndices(
@@ -188,15 +200,15 @@ public class TabletHealthProcDir implements ProcDirInterface {
                                 ++tabletNum;
                                 Tablet.TabletStatus res = null;
                                 if (groupId != null) {
+                                    ColocateGroupSchema groupSchema = colocateTableIndex.getGroupSchema(groupId);
+                                    if (groupSchema != null) {
+                                        replicaAlloc = groupSchema.getReplicaAlloc();
+                                    }
                                     Set<Long> backendsSet = colocateTableIndex.getTabletBackendsByGroup(groupId, i);
-                                    res = tablet.getColocateHealthStatus(partition.getVisibleVersion(), replicaAlloc,
-                                            backendsSet);
+                                    res = tablet.getColocateHealth(visibleVersion, replicaAlloc, backendsSet).status;
                                 } else {
-                                    Pair<Tablet.TabletStatus, TabletSchedCtx.Priority> pair =
-                                            tablet.getHealthStatusWithPriority(infoService,
-                                                    SystemInfoService.DEFAULT_CLUSTER, partition.getVisibleVersion(),
-                                                    replicaAlloc, aliveBeIdsInCluster);
-                                    res = pair.first;
+                                    res = tablet.getHealth(infoService, visibleVersion, replicaAlloc,
+                                            aliveBeIds).status;
                                 }
                                 switch (res) { // CHECKSTYLE IGNORE THIS LINE: missing switch default
                                     case HEALTHY:
@@ -218,17 +230,13 @@ public class TabletHealthProcDir implements ProcDirInterface {
                                         redundantNum++;
                                         redundantTabletIds.add(tablet.getId());
                                         break;
-                                    case REPLICA_MISSING_IN_CLUSTER:
-                                        replicaMissingInClusterNum++;
-                                        replicaMissingInClusterTabletIds.add(tablet.getId());
+                                    case FORCE_REDUNDANT:
+                                        forceRedundantNum++;
+                                        forceRedundantTabletIds.add(tablet.getId());
                                         break;
                                     case REPLICA_MISSING_FOR_TAG:
                                         replicaMissingForTagNum++;
                                         replicaMissingForTagTabletIds.add(tablet.getId());
-                                        break;
-                                    case FORCE_REDUNDANT:
-                                        forceRedundantNum++;
-                                        forceRedundantTabletIds.add(tablet.getId());
                                         break;
                                     case COLOCATE_MISMATCH:
                                         colocateMismatchNum++;
@@ -259,8 +267,7 @@ public class TabletHealthProcDir implements ProcDirInterface {
                                     oversizeTabletIds.add(tablet.getId());
                                 }
                                 for (Replica replica : tablet.getReplicas()) {
-                                    if (replica.getVersionCount()
-                                            > Config.min_version_count_indicate_replica_compaction_too_slow) {
+                                    if (replica.tooBigVersionCount()) {
                                         replicaCompactionTooSlowNum++;
                                         replicaCompactionTooSlowTabletIds.add(tablet.getId());
                                         break;
@@ -284,9 +291,8 @@ public class TabletHealthProcDir implements ProcDirInterface {
                 this.versionIncompleteNum += other.versionIncompleteNum;
                 this.replicaRelocatingNum += other.replicaRelocatingNum;
                 this.redundantNum += other.redundantNum;
-                this.replicaMissingInClusterNum += other.replicaMissingInClusterNum;
-                this.replicaMissingForTagNum += other.replicaMissingForTagNum;
                 this.forceRedundantNum += other.forceRedundantNum;
+                this.replicaMissingForTagNum += other.replicaMissingForTagNum;
                 this.colocateMismatchNum += other.colocateMismatchNum;
                 this.colocateRedundantNum += other.colocateRedundantNum;
                 this.needFurtherRepairNum += other.needFurtherRepairNum;
@@ -319,7 +325,6 @@ public class TabletHealthProcDir implements ProcDirInterface {
             row.add(versionIncompleteNum);
             row.add(replicaRelocatingNum);
             row.add(redundantNum);
-            row.add(replicaMissingInClusterNum);
             row.add(replicaMissingForTagNum);
             row.add(forceRedundantNum);
             row.add(colocateMismatchNum);

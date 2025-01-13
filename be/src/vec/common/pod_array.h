@@ -21,19 +21,20 @@
 #pragma once
 
 #include <common/compiler_util.h>
+#include <stdint.h>
 #include <string.h>
+#include <sys/types.h>
 
 #include <algorithm>
-#include <boost/iterator_adaptors.hpp>
-#include <boost/noncopyable.hpp>
+#include <boost/core/noncopyable.hpp>
 #include <cassert>
 #include <cstddef>
-#include <memory>
+#include <initializer_list>
+#include <utility>
 
-#include "vec/common/allocator.h"
-#include "vec/common/bit_helpers.h"
+#include "common/compiler_util.h" // IWYU pragma: keep
+#include "vec/common/allocator.h" // IWYU pragma: keep
 #include "vec/common/memcpy_small.h"
-#include "vec/common/strong_typedef.h"
 
 #ifndef NDEBUG
 #include <sys/mman.h>
@@ -42,6 +43,23 @@
 #include "vec/common/pod_array_fwd.h"
 
 namespace doris::vectorized {
+
+/** For zero argument, result is zero.
+  * For arguments with most significand bit set, result is zero.
+  * For other arguments, returns value, rounded up to power of two.
+  */
+inline size_t round_up_to_power_of_two_or_zero(size_t n) {
+    --n;
+    n |= n >> 1;
+    n |= n >> 2;
+    n |= n >> 4;
+    n |= n >> 8;
+    n |= n >> 16;
+    n |= n >> 32;
+    ++n;
+
+    return n;
+}
 
 /** A dynamic array for POD types.
   * Designed for a small number of large arrays (rather than a lot of small ones).
@@ -73,6 +91,9 @@ namespace doris::vectorized {
   *  and we must avoid larger object size due to storing the same parameters in each object.
   * This is required for states of aggregate functions.
   *
+  * PODArray does not have memset 0 when allocating memory, therefore, the query mem tracker is virtual memory,
+  * which will cause the query memory statistics to be higher than the actual physical memory.
+  *
   * TODO Pass alignment to Allocator.
   * TODO Allow greater alignment than alignof(T). Example: array of char aligned to page size.
   */
@@ -93,8 +114,7 @@ protected:
     /// pad_left is also rounded up to 16 bytes to maintain alignment of allocated memory.
     static constexpr size_t pad_left = integerRoundUp(integerRoundUp(pad_left_, ELEMENT_SIZE), 16);
     /// Empty array will point to this static memory as padding.
-    static constexpr char* null =
-            pad_left ? const_cast<char*>(empty_pod_array) + EmptyPODArraySize : nullptr;
+    static constexpr char* null = const_cast<char*>(empty_pod_array) + pad_left;
 
     static_assert(pad_left <= EmptyPODArraySize &&
                   "Left Padding exceeds EmptyPODArraySize. Is the element size too large?");
@@ -102,22 +122,25 @@ protected:
     char* c_start = null; /// Does not include pad_left.
     char* c_end = null;
     char* c_end_of_storage = null; /// Does not include pad_right.
-    char* c_end_peak = null;
 
     /// The amount of memory occupied by the num_elements of the elements.
-    static size_t byte_size(size_t num_elements) { return num_elements * ELEMENT_SIZE; }
+    static size_t byte_size(size_t num_elements) {
+#ifndef NDEBUG
+        size_t amount;
+        if (__builtin_mul_overflow(num_elements, ELEMENT_SIZE, &amount)) {
+            DCHECK(false)
+                    << "Amount of memory requested to allocate is more than allowed, num_elements "
+                    << num_elements << ", ELEMENT_SIZE " << ELEMENT_SIZE;
+        }
+        return amount;
+#else
+        return num_elements * ELEMENT_SIZE;
+#endif
+    }
 
     /// Minimum amount of memory to allocate for num_elements, including padding.
     static size_t minimum_memory_for_elements(size_t num_elements) {
         return byte_size(num_elements) + pad_right + pad_left;
-    }
-
-    inline void reset_peak() {
-        if (UNLIKELY(c_end - c_end_peak > 65536)) {
-            THREAD_MEM_TRACKER_TRANSFER_FROM(c_end - c_end_peak,
-                                             ExecEnv::GetInstance()->orphan_mem_tracker_raw());
-            c_end_peak = c_end;
-        }
     }
 
     void alloc_for_num_elements(size_t num_elements) {
@@ -126,13 +149,12 @@ protected:
 
     template <typename... TAllocatorParams>
     void alloc(size_t bytes, TAllocatorParams&&... allocator_params) {
-        THREAD_MEM_TRACKER_TRANSFER_TO(bytes - pad_right - pad_left,
-                                       ExecEnv::GetInstance()->orphan_mem_tracker_raw());
-        c_start = c_end = c_end_peak =
-                reinterpret_cast<char*>(TAllocator::alloc(
-                        bytes, std::forward<TAllocatorParams>(allocator_params)...)) +
-                pad_left;
-        c_end_of_storage = c_start + bytes - pad_right - pad_left;
+        char* allocated = reinterpret_cast<char*>(
+                TAllocator::alloc(bytes, std::forward<TAllocatorParams>(allocator_params)...));
+
+        c_start = allocated + pad_left;
+        c_end = c_start;
+        c_end_of_storage = allocated + bytes - pad_right;
 
         if (pad_left) memset(c_start - ELEMENT_SIZE, 0, ELEMENT_SIZE);
     }
@@ -143,8 +165,6 @@ protected:
         unprotect();
 
         TAllocator::free(c_start - pad_left, allocated_bytes());
-        THREAD_MEM_TRACKER_TRANSFER_FROM(c_end_of_storage - c_end_peak,
-                                         ExecEnv::GetInstance()->orphan_mem_tracker_raw());
     }
 
     template <typename... TAllocatorParams>
@@ -156,20 +176,15 @@ protected:
 
         unprotect();
 
-        THREAD_MEM_TRACKER_TRANSFER_TO(bytes - allocated_bytes(),
-                                       ExecEnv::GetInstance()->orphan_mem_tracker_raw());
-
         ptrdiff_t end_diff = c_end - c_start;
-        ptrdiff_t peak_diff = c_end_peak - c_start;
 
-        c_start = reinterpret_cast<char*>(TAllocator::realloc(
-                          c_start - pad_left, allocated_bytes(), bytes,
-                          std::forward<TAllocatorParams>(allocator_params)...)) +
-                  pad_left;
+        char* allocated = reinterpret_cast<char*>(
+                TAllocator::realloc(c_start - pad_left, allocated_bytes(), bytes,
+                                    std::forward<TAllocatorParams>(allocator_params)...));
 
+        c_start = allocated + pad_left;
         c_end = c_start + end_diff;
-        c_end_peak = c_start + peak_diff;
-        c_end_of_storage = c_start + bytes - pad_right - pad_left;
+        c_end_of_storage = allocated + bytes - pad_right;
     }
 
     bool is_initialized() const {
@@ -177,7 +192,7 @@ protected:
     }
 
     bool is_allocated_from_stack() const {
-        constexpr size_t stack_threshold = TAllocator::getStackThreshold();
+        constexpr size_t stack_threshold = TAllocator::get_stack_threshold();
         return (stack_threshold > 0) && (allocated_bytes() <= stack_threshold);
     }
 
@@ -222,7 +237,12 @@ public:
     size_t capacity() const { return (c_end_of_storage - c_start) / ELEMENT_SIZE; }
 
     /// This method is safe to use only for information about memory usage.
-    size_t allocated_bytes() const { return c_end_of_storage - c_start + pad_right + pad_left; }
+    size_t allocated_bytes() const {
+        if (c_end_of_storage == null) {
+            return 0;
+        }
+        return c_end_of_storage - c_start + pad_right + pad_left;
+    }
 
     void clear() { c_end = c_start; }
 
@@ -239,10 +259,7 @@ public:
         resize_assume_reserved(n);
     }
 
-    void resize_assume_reserved(const size_t n) {
-        c_end = c_start + byte_size(n);
-        reset_peak();
-    }
+    void resize_assume_reserved(const size_t n) { c_end = c_start + byte_size(n); }
 
     const char* raw_data() const { return c_start; }
 
@@ -253,7 +270,6 @@ public:
 
         memcpy(c_end, ptr, ELEMENT_SIZE);
         c_end += byte_size(1);
-        reset_peak();
     }
 
     void protect() {
@@ -270,6 +286,19 @@ public:
 #endif
     }
 
+    template <typename It1, typename It2>
+    void assert_not_intersects(It1 from_begin [[maybe_unused]], It2 from_end [[maybe_unused]]) {
+#ifndef NDEBUG
+        const char* ptr_begin = reinterpret_cast<const char*>(&*from_begin);
+        const char* ptr_end = reinterpret_cast<const char*>(&*from_end);
+
+        /// Also it's safe if the range is empty.
+        assert(!((ptr_begin >= c_start && ptr_begin < c_end) ||
+                 (ptr_end > c_start && ptr_end <= c_end)) ||
+               (ptr_begin == ptr_end));
+#endif
+    }
+
     ~PODArrayBase() { dealloc(); }
 };
 
@@ -281,32 +310,24 @@ protected:
 
     T* t_start() { return reinterpret_cast<T*>(this->c_start); }
     T* t_end() { return reinterpret_cast<T*>(this->c_end); }
-    T* t_end_of_storage() { return reinterpret_cast<T*>(this->c_end_of_storage); }
 
     const T* t_start() const { return reinterpret_cast<const T*>(this->c_start); }
     const T* t_end() const { return reinterpret_cast<const T*>(this->c_end); }
-    const T* t_end_of_storage() const { return reinterpret_cast<const T*>(this->c_end_of_storage); }
 
 public:
     using value_type = T;
 
-    /// You can not just use `typedef`, because there is ambiguity for the constructors and `assign` functions.
-    struct iterator : public boost::iterator_adaptor<iterator, T*> {
-        iterator() {}
-        iterator(T* ptr_) : iterator::iterator_adaptor_(ptr_) {}
-    };
+    /// We cannot use boost::iterator_adaptor, because it defeats loop vectorization,
+    ///  see https://github.com/ClickHouse/ClickHouse/pull/9442
 
-    struct const_iterator : public boost::iterator_adaptor<const_iterator, const T*> {
-        const_iterator() {}
-        const_iterator(const T* ptr_) : const_iterator::iterator_adaptor_(ptr_) {}
-    };
+    using iterator = T*;
+    using const_iterator = const T*;
 
-    PODArray() {}
+    PODArray() = default;
 
     PODArray(size_t n) {
         this->alloc_for_num_elements(n);
         this->c_end += this->byte_size(n);
-        this->reset_peak();
     }
 
     PODArray(size_t n, const T& x) {
@@ -334,14 +355,14 @@ public:
     /// The index is signed to access -1th element without pointer overflow.
     T& operator[](ssize_t n) {
         /// <= size, because taking address of one element past memory range is Ok in C++ (expression like &arr[arr.size()] is perfectly valid).
-        assert((n >= (static_cast<ssize_t>(pad_left_) ? -1 : 0)) &&
-               (n <= static_cast<ssize_t>(this->size())));
+        DCHECK_GE(n, (static_cast<ssize_t>(pad_left_) ? -1 : 0));
+        DCHECK_LE(n, static_cast<ssize_t>(this->size()));
         return t_start()[n];
     }
 
     const T& operator[](ssize_t n) const {
-        assert((n >= (static_cast<ssize_t>(pad_left_) ? -1 : 0)) &&
-               (n <= static_cast<ssize_t>(this->size())));
+        DCHECK_GE(n, (static_cast<ssize_t>(pad_left_) ? -1 : 0));
+        DCHECK_LE(n, static_cast<ssize_t>(this->size()));
         return t_start()[n];
     }
 
@@ -358,10 +379,7 @@ public:
     const_iterator cend() const { return t_end(); }
 
     void* get_end_ptr() const { return this->c_end; }
-    void set_end_ptr(void* ptr) {
-        this->c_end = (char*)ptr;
-        this->reset_peak();
-    }
+    void set_end_ptr(void* ptr) { this->c_end = (char*)ptr; }
 
     /// Same as resize, but zeroes new elements.
     void resize_fill(size_t n) {
@@ -371,7 +389,6 @@ public:
             memset(this->c_end, 0, this->byte_size(n - old_size));
         }
         this->c_end = this->c_start + this->byte_size(n);
-        this->reset_peak();
     }
 
     void resize_fill(size_t n, const T& value) {
@@ -381,17 +398,16 @@ public:
             std::fill(t_end(), t_end() + n - old_size, value);
         }
         this->c_end = this->c_start + this->byte_size(n);
-        this->reset_peak();
     }
 
     template <typename U, typename... TAllocatorParams>
     void push_back(U&& x, TAllocatorParams&&... allocator_params) {
-        if (UNLIKELY(this->c_end == this->c_end_of_storage))
+        if (UNLIKELY(this->c_end + sizeof(T) > this->c_end_of_storage)) {
             this->reserve_for_next_size(std::forward<TAllocatorParams>(allocator_params)...);
+        }
 
         new (t_end()) T(std::forward<U>(x));
         this->c_end += this->byte_size(1);
-        this->reset_peak();
     }
 
     template <typename U, typename... TAllocatorParams>
@@ -403,7 +419,6 @@ public:
             }
             std::fill(t_end(), t_end() + num, x);
             this->c_end = new_end;
-            this->reset_peak();
         }
     }
 
@@ -412,7 +427,6 @@ public:
                                          TAllocatorParams&&... allocator_params) {
         std::fill(t_end(), t_end() + num, x);
         this->c_end += sizeof(T) * num;
-        this->reset_peak();
     }
 
     /**
@@ -423,7 +437,6 @@ public:
     void push_back_without_reserve(U&& x, TAllocatorParams&&... allocator_params) {
         new (t_end()) T(std::forward<U>(x));
         this->c_end += this->byte_size(1);
-        this->reset_peak();
     }
 
     /** This method doesn't allow to pass parameters for Allocator,
@@ -431,11 +444,12 @@ public:
       */
     template <typename... Args>
     void emplace_back(Args&&... args) {
-        if (UNLIKELY(this->c_end == this->c_end_of_storage)) this->reserve_for_next_size();
+        if (UNLIKELY(this->c_end + sizeof(T) > this->c_end_of_storage)) {
+            this->reserve_for_next_size();
+        }
 
         new (t_end()) T(std::forward<Args>(args)...);
         this->c_end += this->byte_size(1);
-        this->reset_peak();
     }
 
     void pop_back() { this->c_end -= this->byte_size(1); }
@@ -443,6 +457,7 @@ public:
     /// Do not insert into the array a piece of itself. Because with the resize, the iterators on themselves can be invalidated.
     template <typename It1, typename It2, typename... TAllocatorParams>
     void insert_prepare(It1 from_begin, It2 from_end, TAllocatorParams&&... allocator_params) {
+        this->assert_not_intersects(from_begin, from_end);
         size_t required_capacity = this->size() + (from_end - from_begin);
         if (required_capacity > this->capacity())
             this->reserve(round_up_to_power_of_two_or_zero(required_capacity),
@@ -452,20 +467,8 @@ public:
     /// Do not insert into the array a piece of itself. Because with the resize, the iterators on themselves can be invalidated.
     template <typename It1, typename It2, typename... TAllocatorParams>
     void insert(It1 from_begin, It2 from_end, TAllocatorParams&&... allocator_params) {
-// `place` in IAggregateFunctionHelper::streaming_agg_serialize is initialized by placement new, in IAggregateFunctionHelper::create.
-#if defined(__clang__)
-#pragma clang diagnostic push
-#pragma clang diagnostic ignored "-Wuninitialized"
-#elif defined(__GNUC__) || defined(__GNUG__)
-#pragma GCC diagnostic push
-#pragma GCC diagnostic ignored "-Wmaybe-uninitialized"
-#endif
         insert_prepare(from_begin, from_end, std::forward<TAllocatorParams>(allocator_params)...);
-#if defined(__clang__)
-#pragma clang diagnostic pop
-#elif defined(__GNUC__) || defined(__GNUG__)
-#pragma GCC diagnostic pop
-#endif
+
         insert_assume_reserved(from_begin, from_end);
     }
 
@@ -479,35 +482,47 @@ public:
         memcpy_small_allow_read_write_overflow15(
                 this->c_end, reinterpret_cast<const void*>(&*from_begin), bytes_to_copy);
         this->c_end += bytes_to_copy;
-        this->reset_peak();
     }
 
     template <typename It1, typename It2>
     void insert(iterator it, It1 from_begin, It2 from_end) {
+        size_t bytes_to_copy = this->byte_size(from_end - from_begin);
+        if (!bytes_to_copy) {
+            return;
+        }
+        size_t bytes_to_move = this->byte_size(end() - it);
         insert_prepare(from_begin, from_end);
 
-        size_t bytes_to_copy = this->byte_size(from_end - from_begin);
-        size_t bytes_to_move = (end() - it) * sizeof(T);
-
-        if (UNLIKELY(bytes_to_move))
-            memcpy(this->c_end + bytes_to_copy - bytes_to_move, this->c_end - bytes_to_move,
-                   bytes_to_move);
+        if (UNLIKELY(bytes_to_move)) {
+            memmove(this->c_end + bytes_to_copy - bytes_to_move, this->c_end - bytes_to_move,
+                    bytes_to_move);
+        }
 
         memcpy(this->c_end - bytes_to_move, reinterpret_cast<const void*>(&*from_begin),
                bytes_to_copy);
         this->c_end += bytes_to_copy;
-        this->reset_peak();
     }
 
     template <typename It1, typename It2>
     void insert_assume_reserved(It1 from_begin, It2 from_end) {
+        this->assert_not_intersects(from_begin, from_end);
         size_t bytes_to_copy = this->byte_size(from_end - from_begin);
         memcpy(this->c_end, reinterpret_cast<const void*>(&*from_begin), bytes_to_copy);
         this->c_end += bytes_to_copy;
-        this->reset_peak();
+    }
+
+    template <typename It1, typename It2>
+    void insert_assume_reserved_and_allow_overflow(It1 from_begin, It2 from_end) {
+        size_t bytes_to_copy = this->byte_size(from_end - from_begin);
+        memcpy_small_allow_read_write_overflow15(
+                this->c_end, reinterpret_cast<const void*>(&*from_begin), bytes_to_copy);
+        this->c_end += bytes_to_copy;
     }
 
     void swap(PODArray& rhs) {
+        DCHECK(this->pad_left == rhs.pad_left && this->pad_right == rhs.pad_right)
+                << ", this.pad_left: " << this->pad_left << ", rhs.pad_left: " << rhs.pad_left
+                << ", this.pad_right: " << this->pad_right << ", rhs.pad_right: " << rhs.pad_right;
 #ifndef NDEBUG
         this->unprotect();
         rhs.unprotect();
@@ -523,29 +538,19 @@ public:
             size_t heap_size = arr2.size();
             size_t heap_allocated = arr2.allocated_bytes();
 
-#ifdef USE_MEM_TRACKER
-            size_t stack_peak_used = arr1.c_end_peak - arr1.c_start;
-            size_t heap_peak_used = arr2.c_end_peak - arr2.c_start;
-#endif
-
             /// Keep track of the stack content we have to copy.
             char* stack_c_start = arr1.c_start;
 
             /// arr1 takes ownership of the heap memory of arr2.
             arr1.c_start = arr2.c_start;
-            arr1.c_end_of_storage = arr1.c_start + heap_allocated - arr1.pad_right;
+            arr1.c_end_of_storage = arr1.c_start + heap_allocated - arr2.pad_right - arr2.pad_left;
             arr1.c_end = arr1.c_start + this->byte_size(heap_size);
-            arr1.c_end_peak = arr1.c_end;
-            THREAD_MEM_TRACKER_TRANSFER_FROM(arr1.c_end_peak - arr1.c_start - heap_peak_used,
-                                             ExecEnv::GetInstance()->orphan_mem_tracker_raw());
 
             /// Allocate stack space for arr2.
             arr2.alloc(stack_allocated);
             /// Copy the stack content.
             memcpy(arr2.c_start, stack_c_start, this->byte_size(stack_size));
-            arr2.c_end = arr2.c_end_peak = arr2.c_start + this->byte_size(stack_size);
-            THREAD_MEM_TRACKER_TRANSFER_FROM(arr2.c_end_peak - arr2.c_start - stack_peak_used,
-                                             ExecEnv::GetInstance()->orphan_mem_tracker_raw());
+            arr2.c_end = arr2.c_start + this->byte_size(stack_size);
         };
 
         auto do_move = [this](PODArray& src, PODArray& dest) {
@@ -553,21 +558,15 @@ public:
                 dest.dealloc();
                 dest.alloc(src.allocated_bytes());
                 memcpy(dest.c_start, src.c_start, this->byte_size(src.size()));
-                dest.c_end = dest.c_end_peak = dest.c_start + (src.c_end - src.c_start);
-                THREAD_MEM_TRACKER_TRANSFER_FROM(dest.c_end_peak - dest.c_start,
-                                                 ExecEnv::GetInstance()->orphan_mem_tracker_raw());
+                dest.c_end = dest.c_start + this->byte_size(src.size());
 
-                THREAD_MEM_TRACKER_TRANSFER_FROM(src.c_end_of_storage - src.c_end_peak,
-                                                 ExecEnv::GetInstance()->orphan_mem_tracker_raw());
                 src.c_start = Base::null;
                 src.c_end = Base::null;
                 src.c_end_of_storage = Base::null;
-                src.c_end_peak = Base::null;
             } else {
                 std::swap(dest.c_start, src.c_start);
                 std::swap(dest.c_end, src.c_end);
                 std::swap(dest.c_end_of_storage, src.c_end_of_storage);
-                std::swap(dest.c_end_peak, src.c_end_peak);
             }
         };
 
@@ -599,13 +598,12 @@ public:
             size_t rhs_size = rhs.size();
             size_t rhs_allocated = rhs.allocated_bytes();
 
-            this->c_end_of_storage = this->c_start + rhs_allocated - Base::pad_right;
-            rhs.c_end_of_storage = rhs.c_start + lhs_allocated - Base::pad_right;
+            this->c_end_of_storage =
+                    this->c_start + rhs_allocated - Base::pad_right - Base::pad_left;
+            rhs.c_end_of_storage = rhs.c_start + lhs_allocated - Base::pad_right - Base::pad_left;
 
             this->c_end = this->c_start + this->byte_size(rhs_size);
             rhs.c_end = rhs.c_start + this->byte_size(lhs_size);
-            this->reset_peak();
-            rhs.reset_peak();
         } else if (this->is_allocated_from_stack() && !rhs.is_allocated_from_stack()) {
             swap_stack_heap(*this, rhs);
         } else if (!this->is_allocated_from_stack() && rhs.is_allocated_from_stack()) {
@@ -614,7 +612,6 @@ public:
             std::swap(this->c_start, rhs.c_start);
             std::swap(this->c_end, rhs.c_end);
             std::swap(this->c_end_of_storage, rhs.c_end_of_storage);
-            std::swap(this->c_end_peak, rhs.c_end_peak);
         }
     }
 
@@ -625,6 +622,7 @@ public:
 
     template <typename It1, typename It2>
     void assign(It1 from_begin, It2 from_end) {
+        this->assert_not_intersects(from_begin, from_end);
         size_t required_capacity = from_end - from_begin;
         if (required_capacity > this->capacity())
             this->reserve(round_up_to_power_of_two_or_zero(required_capacity));
@@ -632,33 +630,57 @@ public:
         size_t bytes_to_copy = this->byte_size(required_capacity);
         memcpy(this->c_start, reinterpret_cast<const void*>(&*from_begin), bytes_to_copy);
         this->c_end = this->c_start + bytes_to_copy;
-        this->reset_peak();
     }
 
     void assign(const PODArray& from) { assign(from.begin(), from.end()); }
 
-    bool operator==(const PODArray& other) const {
-        if (this->size() != other.size()) return false;
+    void erase(const_iterator first, const_iterator last) {
+        auto first_no_const = const_cast<iterator>(first);
+        auto last_no_const = const_cast<iterator>(last);
 
-        const_iterator this_it = begin();
-        const_iterator that_it = other.begin();
+        size_t items_to_move = end() - last;
 
-        while (this_it != end()) {
-            if (*this_it != *that_it) return false;
+        while (items_to_move != 0) {
+            *first_no_const = *last_no_const;
 
-            ++this_it;
-            ++that_it;
+            ++first_no_const;
+            ++last_no_const;
+
+            --items_to_move;
+        }
+
+        this->c_end = reinterpret_cast<char*>(first_no_const);
+    }
+
+    void erase(const_iterator pos) { this->erase(pos, pos + 1); }
+
+    bool operator==(const PODArray& rhs) const {
+        if (this->size() != rhs.size()) {
+            return false;
+        }
+
+        const_iterator lhs_it = begin();
+        const_iterator rhs_it = rhs.begin();
+
+        while (lhs_it != end()) {
+            if (*lhs_it != *rhs_it) {
+                return false;
+            }
+
+            ++lhs_it;
+            ++rhs_it;
         }
 
         return true;
     }
 
-    bool operator!=(const PODArray& other) const { return !operator==(other); }
+    bool operator!=(const PODArray& rhs) const { return !operator==(rhs); }
 };
 
-template <typename T, size_t initial_bytes, typename TAllocator, size_t pad_right_>
-void swap(PODArray<T, initial_bytes, TAllocator, pad_right_>& lhs,
-          PODArray<T, initial_bytes, TAllocator, pad_right_>& rhs) {
+template <typename T, size_t initial_bytes, typename TAllocator, size_t pad_right_,
+          size_t pad_left_>
+void swap(PODArray<T, initial_bytes, TAllocator, pad_right_, pad_left_>& lhs,
+          PODArray<T, initial_bytes, TAllocator, pad_right_, pad_left_>& rhs) {
     lhs.swap(rhs);
 }
 

@@ -17,10 +17,16 @@
 
 package org.apache.doris.persist;
 
+import org.apache.doris.catalog.Env;
 import org.apache.doris.catalog.Table;
+import org.apache.doris.cluster.ClusterNamespace;
+import org.apache.doris.common.FeMetaVersion;
 import org.apache.doris.common.io.Text;
 import org.apache.doris.common.io.Writable;
+import org.apache.doris.persist.gson.GsonPostProcessable;
+import org.apache.doris.persist.gson.GsonUtils;
 
+import com.google.gson.annotations.SerializedName;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -29,10 +35,12 @@ import java.io.DataOutput;
 import java.io.IOException;
 import java.util.Objects;
 
-public class CreateTableInfo implements Writable {
+public class CreateTableInfo implements Writable, GsonPostProcessable {
     public static final Logger LOG = LoggerFactory.getLogger(CreateTableInfo.class);
 
+    @SerializedName(value = "dbName")
     private String dbName;
+    @SerializedName(value = "table")
     private Table table;
 
     public CreateTableInfo() {
@@ -52,20 +60,25 @@ public class CreateTableInfo implements Writable {
         return table;
     }
 
+    @Override
     public void write(DataOutput out) throws IOException {
-        Text.writeString(out, dbName);
-        table.write(out);
-    }
-
-    public void readFields(DataInput in) throws IOException {
-        dbName = Text.readString(in);
-        table = Table.read(in);
+        Text.writeString(out, GsonUtils.GSON.toJson(this));
     }
 
     public static CreateTableInfo read(DataInput in) throws IOException {
-        CreateTableInfo createTableInfo = new CreateTableInfo();
-        createTableInfo.readFields(in);
-        return createTableInfo;
+        if (Env.getCurrentEnvJournalVersion() < FeMetaVersion.VERSION_137) {
+            CreateTableInfo createTableInfo = new CreateTableInfo();
+            createTableInfo.readFields(in);
+            return createTableInfo;
+        } else {
+            return GsonUtils.GSON.fromJson(Text.readString(in), CreateTableInfo.class);
+        }
+    }
+
+    @Deprecated
+    private void readFields(DataInput in) throws IOException {
+        dbName = ClusterNamespace.getNameFromFullName(Text.readString(in));
+        table = Table.read(in);
     }
 
     @Override
@@ -85,5 +98,19 @@ public class CreateTableInfo implements Writable {
 
         return (dbName.equals(info.dbName))
                 && (table.equals(info.table));
+    }
+
+    public String toJson() {
+        return GsonUtils.GSON.toJson(this);
+    }
+
+    @Override
+    public String toString() {
+        return toJson();
+    }
+
+    @Override
+    public void gsonPostProcess() throws IOException {
+        dbName = ClusterNamespace.getNameFromFullName(dbName);
     }
 }

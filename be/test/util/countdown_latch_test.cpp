@@ -17,11 +17,15 @@
 
 #include "util/countdown_latch.h"
 
-#include <gtest/gtest.h>
+#include <gtest/gtest-message.h>
+#include <gtest/gtest-test-part.h>
 
 #include <functional>
+#include <memory>
 #include <thread>
 
+#include "common/status.h"
+#include "gtest/gtest_pred_impl.h"
 #include "gutil/ref_counted.h"
 #include "util/thread.h"
 #include "util/threadpool.h"
@@ -55,6 +59,7 @@ TEST(TestCountDownLatch, TestLatch) {
     EXPECT_TRUE(pool->submit_func(std::bind(decrement_latch, &latch, 1000)).ok());
     latch.wait();
     EXPECT_EQ(0, latch.count());
+    pool.reset();
 }
 
 // Test that resetting to zero while there are waiters lets the waiters

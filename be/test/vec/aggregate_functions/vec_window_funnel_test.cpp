@@ -15,17 +15,31 @@
 // specific language governing permissions and limitations
 // under the License.
 
-#include <gtest/gtest.h>
+#include <glog/logging.h>
+#include <gtest/gtest-message.h>
+#include <gtest/gtest-test-part.h>
+#include <stddef.h>
 
-#include "common/logging.h"
-#include "gtest/gtest.h"
+#include <memory>
+#include <ostream>
+
+#include "gtest/gtest_pred_impl.h"
 #include "vec/aggregate_functions/aggregate_function.h"
 #include "vec/aggregate_functions/aggregate_function_simple_factory.h"
-#include "vec/aggregate_functions/aggregate_function_topn.h"
+#include "vec/columns/column_string.h"
 #include "vec/columns/column_vector.h"
-#include "vec/data_types/data_type.h"
+#include "vec/common/string_buffer.hpp"
+#include "vec/core/types.h"
+#include "vec/data_types/data_type_date_time.h"
 #include "vec/data_types/data_type_number.h"
 #include "vec/data_types/data_type_string.h"
+#include "vec/runtime/vdatetime_value.h"
+
+namespace doris {
+namespace vectorized {
+class IColumn;
+} // namespace vectorized
+} // namespace doris
 
 namespace doris::vectorized {
 
@@ -43,10 +57,9 @@ public:
                 std::make_shared<DataTypeInt64>(),    std::make_shared<DataTypeString>(),
                 std::make_shared<DataTypeDateTime>(), std::make_shared<DataTypeUInt8>(),
                 std::make_shared<DataTypeUInt8>(),    std::make_shared<DataTypeUInt8>(),
-                std::make_shared<DataTypeUInt8>(),
-        };
-        Array array;
-        agg_function = factory.get("window_funnel", data_types, array, false);
+                std::make_shared<DataTypeUInt8>()};
+        agg_function = factory.get("window_funnel", data_types, false,
+                                   BeExecVersionManager::get_newest_version());
         EXPECT_NE(agg_function, nullptr);
     }
 
@@ -93,7 +106,7 @@ TEST_F(VWindowFunnelTest, testSerialize) {
     auto column_timestamp = ColumnVector<Int64>::create();
     for (int i = 0; i < NUM_CONDS; i++) {
         VecDateTimeValue time_value;
-        time_value.set_time(2022, 2, 28, 0, 0, i);
+        time_value.unchecked_set_time(2022, 2, 28, 0, 0, i);
         column_timestamp->insert_data((char*)&time_value, 0);
     }
     auto column_event1 = ColumnVector<UInt8>::create();
@@ -135,10 +148,15 @@ TEST_F(VWindowFunnelTest, testSerialize) {
         agg_function->add(place, column, i, nullptr);
     }
 
+    ColumnVector<Int32> column_result;
+    agg_function->insert_result_into(place, column_result);
+    EXPECT_EQ(column_result.get_data()[0], 3);
+
     ColumnString buf;
     VectorBufferWriter buf_writer(buf);
     agg_function->serialize(place, buf_writer);
     buf_writer.commit();
+    agg_function->destroy(place);
 
     std::unique_ptr<char[]> memory2(new char[agg_function->size_of_data()]);
     AggregateDataPtr place2 = memory2.get();
@@ -146,11 +164,6 @@ TEST_F(VWindowFunnelTest, testSerialize) {
 
     VectorBufferReader buf_reader(buf.get_data_at(0));
     agg_function->deserialize(place2, buf_reader, nullptr);
-
-    ColumnVector<Int32> column_result;
-    agg_function->insert_result_into(place, column_result);
-    EXPECT_EQ(column_result.get_data()[0], 3);
-    agg_function->destroy(place);
 
     ColumnVector<Int32> column_result2;
     agg_function->insert_result_into(place2, column_result2);
@@ -167,7 +180,7 @@ TEST_F(VWindowFunnelTest, testMax4SortedNoMerge) {
     auto column_timestamp = ColumnVector<Int64>::create();
     for (int i = 0; i < NUM_CONDS; i++) {
         VecDateTimeValue time_value;
-        time_value.set_time(2022, 2, 28, 0, 0, i);
+        time_value.unchecked_set_time(2022, 2, 28, 0, 0, i);
         column_timestamp->insert_data((char*)&time_value, 0);
     }
     auto column_event1 = ColumnVector<UInt8>::create();
@@ -228,7 +241,7 @@ TEST_F(VWindowFunnelTest, testMax4SortedMerge) {
     auto column_timestamp = ColumnVector<Int64>::create();
     for (int i = 0; i < NUM_CONDS; i++) {
         VecDateTimeValue time_value;
-        time_value.set_time(2022, 2, 28, 0, 0, i);
+        time_value.unchecked_set_time(2022, 2, 28, 0, 0, i);
         column_timestamp->insert_data((char*)&time_value, 0);
     }
     auto column_event1 = ColumnVector<UInt8>::create();
@@ -295,7 +308,7 @@ TEST_F(VWindowFunnelTest, testMax4ReverseSortedNoMerge) {
     auto column_timestamp = ColumnVector<Int64>::create();
     for (int i = 0; i < NUM_CONDS; i++) {
         VecDateTimeValue time_value;
-        time_value.set_time(2022, 2, 28, 0, 0, NUM_CONDS - i);
+        time_value.unchecked_set_time(2022, 2, 28, 0, 0, NUM_CONDS - i);
         column_timestamp->insert_data((char*)&time_value, 0);
     }
     auto column_event1 = ColumnVector<UInt8>::create();
@@ -357,7 +370,7 @@ TEST_F(VWindowFunnelTest, testMax4ReverseSortedMerge) {
     auto column_timestamp = ColumnVector<Int64>::create();
     for (int i = 0; i < NUM_CONDS; i++) {
         VecDateTimeValue time_value;
-        time_value.set_time(2022, 2, 28, 0, 0, NUM_CONDS - i);
+        time_value.unchecked_set_time(2022, 2, 28, 0, 0, NUM_CONDS - i);
         column_timestamp->insert_data((char*)&time_value, 0);
     }
     auto column_event1 = ColumnVector<UInt8>::create();

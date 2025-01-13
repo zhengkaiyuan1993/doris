@@ -17,509 +17,368 @@
 
 #pragma once
 
-#include <cstdint>
+#include <gen_cpp/parquet_types.h>
+#include <stddef.h>
 
-#include "common/status.h"
-#include "gen_cpp/parquet_types.h"
-#include "gutil/endian.h"
-#include "schema_desc.h"
-#include "util/bit_stream_utils.inline.h"
-#include "util/coding.h"
-#include "util/rle_encoding.h"
-#include "vec/columns/column_array.h"
+#include <cstdint>
+#include <ostream>
+#include <regex>
+#include <string>
+#include <unordered_set>
+#include <vector>
+
 #include "vec/columns/column_nullable.h"
-#include "vec/columns/column_string.h"
-#include "vec/common/int_exp.h"
-#include "vec/data_types/data_type.h"
-#include "vec/data_types/data_type_decimal.h"
-#include "vec/data_types/data_type_nullable.h"
-#include "vec/exec/format/format_common.h"
 
 namespace doris::vectorized {
 
 using level_t = int16_t;
 
 struct RowRange {
-    RowRange() {}
+    RowRange() = default;
     RowRange(int64_t first, int64_t last) : first_row(first), last_row(last) {}
 
     int64_t first_row;
     int64_t last_row;
+
+    bool operator<(const RowRange& range) const { return first_row < range.first_row; }
+
+    std::string debug_string() const {
+        std::stringstream ss;
+        ss << "[" << first_row << "," << last_row << ")";
+        return ss.str();
+    }
 };
 
-struct ParquetReadColumn {
-    ParquetReadColumn(int parquet_col_id, const std::string& file_slot_name)
-            : _parquet_col_id(parquet_col_id), _file_slot_name(file_slot_name) {};
-
-    int _parquet_col_id;
-    const std::string& _file_slot_name;
-};
-
+#pragma pack(1)
 struct ParquetInt96 {
-    uint64_t lo; // time of nanoseconds in a day
-    uint32_t hi; // days from julian epoch
+    int64_t lo; // time of nanoseconds in a day
+    int32_t hi; // days from julian epoch
 
-    inline uint64_t to_timestamp_micros() const;
+    inline int64_t to_timestamp_micros() const {
+        return (hi - JULIAN_EPOCH_OFFSET_DAYS) * MICROS_IN_DAY + lo / NANOS_PER_MICROSECOND;
+    }
+    inline __int128 to_int128() const {
+        __int128 ans = 0;
+        ans = (((__int128)hi) << 64) + lo;
+        return ans;
+    }
 
-    static const uint32_t JULIAN_EPOCH_OFFSET_DAYS;
-    static const uint64_t MICROS_IN_DAY;
-    static const uint64_t NANOS_PER_MICROSECOND;
+    static const int32_t JULIAN_EPOCH_OFFSET_DAYS;
+    static const int64_t MICROS_IN_DAY;
+    static const int64_t NANOS_PER_MICROSECOND;
 };
+#pragma pack()
+static_assert(sizeof(ParquetInt96) == 12, "The size of ParquetInt96 is not 12.");
 
-struct DecodeParams {
-    // schema.logicalType.TIMESTAMP.isAdjustedToUTC == false
-    static const cctz::time_zone utc0;
-    // schema.logicalType.TIMESTAMP.isAdjustedToUTC == true, we should set the time zone
-    cctz::time_zone* ctz = nullptr;
-    int64_t second_mask = 1;
-    int64_t scale_to_nano_factor = 1;
-    DecimalScaleParams decimal_scale;
-};
-
-// the length of non-null values and null values are arranged in turn.
-using RunLengthNullMap = std::vector<u_short>;
-
-class Decoder {
+class FilterMap {
 public:
-    Decoder() = default;
-    virtual ~Decoder() = default;
+    FilterMap() = default;
+    Status init(const uint8_t* filter_map_data, size_t filter_map_size, bool filter_all);
 
-    static Status get_decoder(tparquet::Type::type type, tparquet::Encoding::type encoding,
-                              std::unique_ptr<Decoder>& decoder);
+    Status generate_nested_filter_map(const std::vector<level_t>& rep_levels,
+                                      std::vector<uint8_t>& nested_filter_map_data,
+                                      std::unique_ptr<FilterMap>* nested_filter_map,
+                                      size_t* current_row_ptr, size_t start_index = 0) const;
 
-    // The type with fix length
-    void set_type_length(int32_t type_length) { _type_length = type_length; }
+    const uint8_t* filter_map_data() const { return _filter_map_data; }
+    size_t filter_map_size() const { return _filter_map_size; }
+    bool has_filter() const { return _has_filter; }
+    bool filter_all() const { return _filter_all; }
+    double filter_ratio() const { return _has_filter ? _filter_ratio : 0; }
 
-    // Set the data to be decoded
-    virtual void set_data(Slice* data) {
-        _data = data;
-        _offset = 0;
-    }
+    bool can_filter_all(size_t remaining_num_values, size_t filter_map_index);
 
-    void init(FieldSchema* field_schema, cctz::time_zone* ctz);
-
-    template <typename DecimalPrimitiveType>
-    void init_decimal_converter(DataTypePtr& data_type);
-
-    // Write the decoded values batch to doris's column
-    virtual Status decode_values(MutableColumnPtr& doris_column, DataTypePtr& data_type,
-                                 RunLengthNullMap& null_map, size_t num_values,
-                                 size_t num_nulls) = 0;
-
-    virtual Status skip_values(size_t num_values) = 0;
-
-    virtual Status set_dict(std::unique_ptr<uint8_t[]>& dict, int32_t length, size_t num_values) {
-        return Status::NotSupported("set_dict is not supported");
-    }
-
-protected:
-    int32_t _type_length;
-    Slice* _data = nullptr;
-    uint32_t _offset = 0;
-    FieldSchema* _field_schema = nullptr;
-    std::unique_ptr<DecodeParams> _decode_params = nullptr;
+private:
+    bool _has_filter = false;
+    bool _filter_all = false;
+    const uint8_t* _filter_map_data = nullptr;
+    size_t _filter_map_size = 0;
+    double _filter_ratio = 0;
 };
 
-template <typename DecimalPrimitiveType>
-void Decoder::init_decimal_converter(DataTypePtr& data_type) {
-    if (_decode_params == nullptr || _field_schema == nullptr ||
-        _decode_params->decimal_scale.scale_type != DecimalScaleParams::NOT_INIT) {
-        return;
-    }
-    auto scale = _field_schema->parquet_schema.scale;
-    auto* decimal_type = reinterpret_cast<DataTypeDecimal<Decimal<DecimalPrimitiveType>>*>(
-            const_cast<IDataType*>(remove_nullable(data_type).get()));
-    auto dest_scale = decimal_type->get_scale();
-    if (dest_scale > scale) {
-        _decode_params->decimal_scale.scale_type = DecimalScaleParams::SCALE_UP;
-        _decode_params->decimal_scale.scale_factor =
-                DecimalScaleParams::get_scale_factor<DecimalPrimitiveType>(dest_scale - scale);
-    } else if (dest_scale < scale) {
-        _decode_params->decimal_scale.scale_type = DecimalScaleParams::SCALE_DOWN;
-        _decode_params->decimal_scale.scale_factor =
-                DecimalScaleParams::get_scale_factor<DecimalPrimitiveType>(scale - dest_scale);
-    } else {
-        _decode_params->decimal_scale.scale_type = DecimalScaleParams::NO_SCALE;
-        _decode_params->decimal_scale.scale_factor = 1;
-    }
-}
-
-class FixLengthDecoder final : public Decoder {
+class ColumnSelectVector {
 public:
-    FixLengthDecoder(tparquet::Type::type physical_type) : _physical_type(physical_type) {};
-    ~FixLengthDecoder() override = default;
+    enum DataReadType : uint8_t { CONTENT = 0, NULL_DATA, FILTERED_CONTENT, FILTERED_NULL };
 
-    Status decode_values(MutableColumnPtr& doris_column, DataTypePtr& data_type,
-                         RunLengthNullMap& null_map, size_t num_values, size_t num_nulls) override;
+    ColumnSelectVector() = default;
 
-    Status skip_values(size_t num_values) override;
+    Status init(const std::vector<uint16_t>& run_length_null_map, size_t num_values,
+                NullMap* null_map, FilterMap* filter_map, size_t filter_map_index,
+                const std::unordered_set<size_t>* skipped_indices = nullptr) {
+        _num_values = num_values;
+        _num_nulls = 0;
+        _read_index = 0;
+        size_t map_index = 0;
+        bool is_null = false;
+        _has_filter = filter_map->has_filter();
 
-    Status set_dict(std::unique_ptr<uint8_t[]>& dict, int32_t length, size_t num_values) override;
-
-    void set_data(Slice* data) override;
-
-protected:
-    template <typename Numeric>
-    Status _decode_numeric(MutableColumnPtr& doris_column, RunLengthNullMap& null_map,
-                           size_t num_values);
-
-    template <typename CppType, typename ColumnType>
-    Status _decode_date(MutableColumnPtr& doris_column, RunLengthNullMap& null_map,
-                        size_t num_values);
-
-    template <typename CppType, typename ColumnType>
-    Status _decode_datetime64(MutableColumnPtr& doris_column, RunLengthNullMap& null_map,
-                              size_t num_values);
-
-    template <typename CppType, typename ColumnType>
-    Status _decode_datetime96(MutableColumnPtr& doris_column, RunLengthNullMap& null_map,
-                              size_t num_values);
-
-    template <typename DecimalPrimitiveType>
-    Status _decode_binary_decimal(MutableColumnPtr& doris_column, DataTypePtr& data_type,
-                                  RunLengthNullMap& null_map, size_t num_values);
-
-    template <typename DecimalPrimitiveType, typename DecimalPhysicalType>
-    Status _decode_primitive_decimal(MutableColumnPtr& doris_column, DataTypePtr& data_type,
-                                     RunLengthNullMap& null_map, size_t num_values);
-
-    Status _decode_string(MutableColumnPtr& doris_column, RunLengthNullMap& null_map,
-                          size_t num_values);
-
-#define _FIXED_GET_DATA_OFFSET(index) \
-    _has_dict ? _dict_items[_indexes[index]] : _data->data + _offset
-
-#define _FIXED_SHIFT_DATA_OFFSET() \
-    if (!_has_dict) _offset += _type_length
-
-    tparquet::Type::type _physical_type;
-    // For dictionary encoding
-    bool _has_dict = false;
-    std::unique_ptr<uint8_t[]> _dict = nullptr;
-    std::vector<char*> _dict_items;
-    std::unique_ptr<RleBatchDecoder<uint32_t>> _index_batch_decoder = nullptr;
-    std::vector<uint32_t> _indexes;
-};
-
-template <typename Numeric>
-Status FixLengthDecoder::_decode_numeric(MutableColumnPtr& doris_column, RunLengthNullMap& null_map,
-                                         size_t num_values) {
-    auto& column_data = static_cast<ColumnVector<Numeric>&>(*doris_column).get_data();
-    size_t data_index = column_data.size();
-    column_data.resize(data_index + num_values);
-    bool is_null = false;
-    size_t dict_index = 0;
-    for (auto& run_length : null_map) {
-        if (is_null) {
-            data_index += run_length;
-        } else {
-            for (int i = 0; i < run_length; ++i) {
-                char* buf_start = _FIXED_GET_DATA_OFFSET(dict_index++);
-                column_data[data_index++] = *(Numeric*)buf_start;
-                _FIXED_SHIFT_DATA_OFFSET();
-            }
-        }
-        is_null = !is_null;
-    }
-    return Status::OK();
-}
-
-template <typename CppType, typename ColumnType>
-Status FixLengthDecoder::_decode_date(MutableColumnPtr& doris_column, RunLengthNullMap& null_map,
-                                      size_t num_values) {
-    auto& column_data = static_cast<ColumnVector<ColumnType>&>(*doris_column).get_data();
-    size_t data_index = column_data.size();
-    column_data.resize(data_index + num_values);
-    bool is_null = false;
-    size_t dict_index = 0;
-    for (auto& run_length : null_map) {
-        if (is_null) {
-            data_index += run_length;
-        } else {
-            for (int i = 0; i < run_length; ++i) {
-                char* buf_start = _FIXED_GET_DATA_OFFSET(dict_index++);
-                int64_t date_value = static_cast<int64_t>(*reinterpret_cast<int32_t*>(buf_start));
-                auto& v = reinterpret_cast<CppType&>(column_data[data_index++]);
-                v.from_unixtime(date_value * 24 * 60 * 60, *_decode_params->ctz); // day to seconds
-                if constexpr (std::is_same_v<CppType, VecDateTimeValue>) {
-                    // we should cast to date if using date v1.
-                    v.cast_to_date();
-                }
-                _FIXED_SHIFT_DATA_OFFSET();
-            }
-        }
-        is_null = !is_null;
-    }
-    return Status::OK();
-}
-
-template <typename CppType, typename ColumnType>
-Status FixLengthDecoder::_decode_datetime64(MutableColumnPtr& doris_column,
-                                            RunLengthNullMap& null_map, size_t num_values) {
-    auto& column_data = static_cast<ColumnVector<ColumnType>&>(*doris_column).get_data();
-    size_t data_index = column_data.size();
-    column_data.resize(data_index + num_values);
-    bool is_null = false;
-    size_t dict_index = 0;
-    int64_t scale_to_micro = _decode_params->scale_to_nano_factor / 1000;
-    for (auto& run_length : null_map) {
-        if (is_null) {
-            data_index += run_length;
-        } else {
-            for (int i = 0; i < run_length; ++i) {
-                char* buf_start = _FIXED_GET_DATA_OFFSET(dict_index++);
-                int64_t& date_value = *reinterpret_cast<int64_t*>(buf_start);
-                auto& v = reinterpret_cast<CppType&>(column_data[data_index++]);
-                v.from_unixtime(date_value / _decode_params->second_mask, *_decode_params->ctz);
-                if constexpr (std::is_same_v<CppType, DateV2Value<DateTimeV2ValueType>>) {
-                    // nanoseconds will be ignored.
-                    v.set_microsecond((date_value % _decode_params->second_mask) * scale_to_micro);
-                    // TODO: the precision of datetime v1
-                }
-                _FIXED_SHIFT_DATA_OFFSET();
-            }
-        }
-        is_null = !is_null;
-    }
-    return Status::OK();
-}
-
-template <typename CppType, typename ColumnType>
-Status FixLengthDecoder::_decode_datetime96(MutableColumnPtr& doris_column,
-                                            RunLengthNullMap& null_map, size_t num_values) {
-    auto& column_data = static_cast<ColumnVector<ColumnType>&>(*doris_column).get_data();
-    size_t data_index = column_data.size();
-    column_data.resize(data_index + num_values);
-    bool is_null = false;
-    size_t dict_index = 0;
-    for (auto& run_length : null_map) {
-        if (is_null) {
-            data_index += run_length;
-        } else {
-            for (int i = 0; i < run_length; ++i) {
-                char* buf_start = _FIXED_GET_DATA_OFFSET(dict_index++);
-                ParquetInt96& datetime96 = *reinterpret_cast<ParquetInt96*>(buf_start);
-                auto& v = reinterpret_cast<CppType&>(column_data[data_index++]);
-                int64_t micros = datetime96.to_timestamp_micros();
-                v.from_unixtime(micros / 1000000, *_decode_params->ctz);
-                if constexpr (std::is_same_v<CppType, DateV2Value<DateTimeV2ValueType>>) {
-                    // spark.sql.parquet.outputTimestampType = INT96(NANOS) will lost precision.
-                    // only keep microseconds.
-                    v.set_microsecond(micros % 1000000);
-                }
-                _FIXED_SHIFT_DATA_OFFSET();
-            }
-        }
-        is_null = !is_null;
-    }
-    return Status::OK();
-}
-
-template <typename DecimalPrimitiveType>
-Status FixLengthDecoder::_decode_binary_decimal(MutableColumnPtr& doris_column,
-                                                DataTypePtr& data_type, RunLengthNullMap& null_map,
-                                                size_t num_values) {
-    init_decimal_converter<DecimalPrimitiveType>(data_type);
-    auto& column_data =
-            static_cast<ColumnDecimal<Decimal<DecimalPrimitiveType>>&>(*doris_column).get_data();
-    size_t data_index = column_data.size();
-    column_data.resize(data_index + num_values);
-    bool is_null = false;
-    size_t dict_index = 0;
-    DecimalScaleParams& scale_params = _decode_params->decimal_scale;
-    for (auto& run_length : null_map) {
-        if (is_null) {
-            data_index += run_length;
-        } else {
-            for (int i = 0; i < run_length; ++i) {
-                char* buf_start = _FIXED_GET_DATA_OFFSET(dict_index++);
-                // When Decimal in parquet is stored in byte arrays, binary and fixed,
-                // the unscaled number must be encoded as two's complement using big-endian byte order.
-                Int128 value = buf_start[0] & 0x80 ? -1 : 0;
-                memcpy(reinterpret_cast<char*>(&value) + sizeof(Int128) - _type_length, buf_start,
-                       _type_length);
-                value = BigEndian::ToHost128(value);
-                if (scale_params.scale_type == DecimalScaleParams::SCALE_UP) {
-                    value *= scale_params.scale_factor;
-                } else if (scale_params.scale_type == DecimalScaleParams::SCALE_DOWN) {
-                    value /= scale_params.scale_factor;
-                }
-                auto& v = reinterpret_cast<DecimalPrimitiveType&>(column_data[data_index++]);
-                v = (DecimalPrimitiveType)value;
-                _FIXED_SHIFT_DATA_OFFSET();
-            }
-        }
-        is_null = !is_null;
-    }
-    return Status::OK();
-}
-
-template <typename DecimalPrimitiveType, typename DecimalPhysicalType>
-Status FixLengthDecoder::_decode_primitive_decimal(MutableColumnPtr& doris_column,
-                                                   DataTypePtr& data_type,
-                                                   RunLengthNullMap& null_map, size_t num_values) {
-    init_decimal_converter<DecimalPrimitiveType>(data_type);
-    auto& column_data =
-            static_cast<ColumnDecimal<Decimal<DecimalPrimitiveType>>&>(*doris_column).get_data();
-    size_t data_index = column_data.size();
-    column_data.resize(data_index + num_values);
-    bool is_null = false;
-    size_t dict_index = 0;
-    DecimalScaleParams& scale_params = _decode_params->decimal_scale;
-    for (auto& run_length : null_map) {
-        if (is_null) {
-            data_index += run_length;
-        } else {
-            for (int i = 0; i < run_length; ++i) {
-                char* buf_start = _FIXED_GET_DATA_OFFSET(dict_index++);
-                // we should use decimal128 to scale up/down
-                Int128 value = *reinterpret_cast<DecimalPhysicalType*>(buf_start);
-                if (scale_params.scale_type == DecimalScaleParams::SCALE_UP) {
-                    value *= scale_params.scale_factor;
-                } else if (scale_params.scale_type == DecimalScaleParams::SCALE_DOWN) {
-                    value /= scale_params.scale_factor;
-                }
-                auto& v = reinterpret_cast<DecimalPrimitiveType&>(column_data[data_index++]);
-                v = (DecimalPrimitiveType)value;
-                _FIXED_SHIFT_DATA_OFFSET();
-            }
-        }
-        is_null = !is_null;
-    }
-    return Status::OK();
-}
-
-class ByteArrayDecoder final : public Decoder {
-public:
-    ByteArrayDecoder() = default;
-    ~ByteArrayDecoder() override = default;
-
-    Status decode_values(MutableColumnPtr& doris_column, DataTypePtr& data_type,
-                         RunLengthNullMap& null_map, size_t num_values, size_t num_nulls) override;
-
-    Status skip_values(size_t num_values) override;
-
-    void set_data(Slice* data) override;
-
-    Status set_dict(std::unique_ptr<uint8_t[]>& dict, int32_t length, size_t num_values) override;
-
-protected:
-    template <typename DecimalPrimitiveType>
-    Status _decode_binary_decimal(MutableColumnPtr& doris_column, DataTypePtr& data_type,
-                                  RunLengthNullMap& null_map, size_t num_values);
-
-    // For dictionary encoding
-    bool _has_dict = false;
-    std::unique_ptr<uint8_t[]> _dict = nullptr;
-    std::vector<StringRef> _dict_items;
-    std::unique_ptr<RleBatchDecoder<uint32_t>> _index_batch_decoder = nullptr;
-    std::vector<uint32_t> _indexes;
-};
-
-template <typename DecimalPrimitiveType>
-Status ByteArrayDecoder::_decode_binary_decimal(MutableColumnPtr& doris_column,
-                                                DataTypePtr& data_type, RunLengthNullMap& null_map,
-                                                size_t num_values) {
-    init_decimal_converter<DecimalPrimitiveType>(data_type);
-    auto& column_data =
-            static_cast<ColumnDecimal<Decimal<DecimalPrimitiveType>>&>(*doris_column).get_data();
-    size_t data_index = column_data.size();
-    column_data.resize(data_index + num_values);
-    bool is_null = false;
-    size_t dict_index = 0;
-    DecimalScaleParams& scale_params = _decode_params->decimal_scale;
-    for (auto& run_length : null_map) {
-        if (is_null) {
-            data_index += run_length;
-        } else {
-            for (int i = 0; i < run_length; ++i) {
-                char* buf_start;
-                uint32_t length;
-                if (_has_dict) {
-                    StringRef& slice = _dict_items[_indexes[dict_index++]];
-                    buf_start = const_cast<char*>(slice.data);
-                    length = (uint32_t)slice.size;
-                } else {
-                    if (UNLIKELY(_offset + 4 > _data->size)) {
-                        return Status::IOError("Can't read byte array length from plain decoder");
+        if (filter_map->has_filter()) {
+            // No run length null map is generated when _filter_all = true
+            DCHECK(!filter_map->filter_all());
+            _data_map.resize(num_values);
+            for (auto& run_length : run_length_null_map) {
+                if (is_null) {
+                    _num_nulls += run_length;
+                    for (int i = 0; i < run_length; ++i) {
+                        _data_map[map_index++] = FILTERED_NULL;
                     }
-                    length = decode_fixed32_le(reinterpret_cast<const uint8_t*>(_data->data) +
-                                               _offset);
-                    _offset += 4;
-                    buf_start = _data->data + _offset;
-                    _offset += length;
+                } else {
+                    for (int i = 0; i < run_length; ++i) {
+                        _data_map[map_index++] = FILTERED_CONTENT;
+                    }
                 }
-                // When Decimal in parquet is stored in byte arrays, binary and fixed,
-                // the unscaled number must be encoded as two's complement using big-endian byte order.
-                Int128 value = buf_start[0] & 0x80 ? -1 : 0;
-                memcpy(reinterpret_cast<char*>(&value) + sizeof(Int128) - length, buf_start,
-                       length);
-                value = BigEndian::ToHost128(value);
-                if (scale_params.scale_type == DecimalScaleParams::SCALE_UP) {
-                    value *= scale_params.scale_factor;
-                } else if (scale_params.scale_type == DecimalScaleParams::SCALE_DOWN) {
-                    value /= scale_params.scale_factor;
-                }
-                auto& v = reinterpret_cast<DecimalPrimitiveType&>(column_data[data_index++]);
-                v = (DecimalPrimitiveType)value;
+                is_null = !is_null;
             }
-        }
-        is_null = !is_null;
-    }
-    return Status::OK();
-}
 
-/// Decoder bit-packed boolean-encoded values.
-/// Implementation from https://github.com/apache/impala/blob/master/be/src/exec/parquet/parquet-bool-decoder.h
-class BoolPlainDecoder final : public Decoder {
-public:
-    BoolPlainDecoder() = default;
-    ~BoolPlainDecoder() override = default;
+            size_t num_read = 0;
+            size_t i = 0;
+            size_t valid_count = 0;
 
-    // Set the data to be decoded
-    void set_data(Slice* data) override {
-        bool_values_.Reset((const uint8_t*)data->data, data->size);
-        num_unpacked_values_ = 0;
-        unpacked_value_idx_ = 0;
-        _offset = 0;
-    }
+            while (valid_count < num_values) {
+                DCHECK_LT(filter_map_index + i, filter_map->filter_map_size());
 
-    Status decode_values(MutableColumnPtr& doris_column, DataTypePtr& data_type,
-                         RunLengthNullMap& null_map, size_t num_values, size_t num_nulls) override;
+                if (skipped_indices != nullptr &&
+                    skipped_indices->count(filter_map_index + i) > 0) {
+                    ++i;
+                    continue;
+                }
 
-    Status skip_values(size_t num_values) override;
+                if (filter_map->filter_map_data()[filter_map_index + i]) {
+                    _data_map[valid_count] =
+                            _data_map[valid_count] == FILTERED_NULL ? NULL_DATA : CONTENT;
+                    num_read++;
+                }
+                ++valid_count;
+                ++i;
+            }
 
-protected:
-    inline bool _decode_value(bool* value) {
-        if (LIKELY(unpacked_value_idx_ < num_unpacked_values_)) {
-            *value = unpacked_values_[unpacked_value_idx_++];
+            _num_filtered = num_values - num_read;
+
+            if (null_map != nullptr && num_read > 0) {
+                NullMap& map_data_column = *null_map;
+                auto null_map_index = map_data_column.size();
+                map_data_column.resize(null_map_index + num_read);
+
+                if (_num_nulls == 0) {
+                    memset(map_data_column.data() + null_map_index, 0, num_read);
+                } else if (_num_nulls == num_values) {
+                    memset(map_data_column.data() + null_map_index, 1, num_read);
+                } else {
+                    for (size_t i = 0; i < num_values; ++i) {
+                        if (_data_map[i] == CONTENT) {
+                            map_data_column[null_map_index++] = (UInt8) false;
+                        } else if (_data_map[i] == NULL_DATA) {
+                            map_data_column[null_map_index++] = (UInt8) true;
+                        }
+                    }
+                }
+            }
         } else {
-            num_unpacked_values_ =
-                    bool_values_.UnpackBatch(1, UNPACKED_BUFFER_LEN, &unpacked_values_[0]);
-            if (UNLIKELY(num_unpacked_values_ == 0)) {
-                return false;
+            _num_filtered = 0;
+            _run_length_null_map = &run_length_null_map;
+            if (null_map != nullptr) {
+                NullMap& map_data_column = *null_map;
+                auto null_map_index = map_data_column.size();
+                map_data_column.resize(null_map_index + num_values);
+
+                for (auto& run_length : run_length_null_map) {
+                    if (is_null) {
+                        memset(map_data_column.data() + null_map_index, 1, run_length);
+                        null_map_index += run_length;
+                        _num_nulls += run_length;
+                    } else {
+                        memset(map_data_column.data() + null_map_index, 0, run_length);
+                        null_map_index += run_length;
+                    }
+                    is_null = !is_null;
+                }
+            } else {
+                for (auto& run_length : run_length_null_map) {
+                    if (is_null) {
+                        _num_nulls += run_length;
+                    }
+                    is_null = !is_null;
+                }
             }
-            *value = unpacked_values_[0];
-            unpacked_value_idx_ = 1;
         }
-        return true;
+        return Status::OK();
     }
 
-    /// A buffer to store unpacked values. Must be a multiple of 32 size to use the
-    /// batch-oriented interface of BatchedBitReader. We use uint8_t instead of bool because
-    /// bit unpacking is only supported for unsigned integers. The values are converted to
-    /// bool when returned to the user.
-    static const int UNPACKED_BUFFER_LEN = 128;
-    uint8_t unpacked_values_[UNPACKED_BUFFER_LEN];
+    size_t num_values() const { return _num_values; }
 
-    /// The number of valid values in 'unpacked_values_'.
-    int num_unpacked_values_ = 0;
+    size_t num_nulls() const { return _num_nulls; }
 
-    /// The next value to return from 'unpacked_values_'.
-    int unpacked_value_idx_ = 0;
+    size_t num_filtered() const { return _num_filtered; }
 
-    /// Bit packed decoder, used if 'encoding_' is PLAIN.
-    BatchedBitReader bool_values_;
+    bool has_filter() const { return _has_filter; }
+
+    template <bool has_filter>
+    size_t get_next_run(DataReadType* data_read_type) {
+        DCHECK_EQ(_has_filter, has_filter);
+        if constexpr (has_filter) {
+            if (_read_index == _num_values) {
+                return 0;
+            }
+            const DataReadType& type = _data_map[_read_index++];
+            size_t run_length = 1;
+            while (_read_index < _num_values) {
+                if (_data_map[_read_index] == type) {
+                    run_length++;
+                    _read_index++;
+                } else {
+                    break;
+                }
+            }
+            *data_read_type = type;
+            return run_length;
+        } else {
+            size_t run_length = 0;
+            while (run_length == 0) {
+                if (_read_index == (*_run_length_null_map).size()) {
+                    return 0;
+                }
+                *data_read_type = _read_index % 2 == 0 ? CONTENT : NULL_DATA;
+                run_length = (*_run_length_null_map)[_read_index++];
+            }
+            return run_length;
+        }
+    }
+
+private:
+    std::vector<DataReadType> _data_map;
+    // the length of non-null values and null values are arranged in turn.
+    const std::vector<uint16_t>* _run_length_null_map;
+    bool _has_filter;
+    size_t _num_values;
+    size_t _num_nulls;
+    size_t _num_filtered;
+    size_t _read_index;
+};
+
+enum class ColumnOrderName { UNDEFINED, TYPE_DEFINED_ORDER };
+
+enum class SortOrder { SIGNED, UNSIGNED, UNKNOWN };
+
+class ParsedVersion {
+public:
+    ParsedVersion(std::string application, std::optional<std::string> version,
+                  std::optional<std::string> app_build_hash);
+
+    const std::string& application() const { return _application; }
+
+    const std::optional<std::string>& version() const { return _version; }
+
+    const std::optional<std::string>& app_build_hash() const { return _app_build_hash; }
+
+    bool operator==(const ParsedVersion& other) const;
+
+    bool operator!=(const ParsedVersion& other) const;
+
+    size_t hash() const;
+
+    std::string to_string() const;
+
+private:
+    std::string _application;
+    std::optional<std::string> _version;
+    std::optional<std::string> _app_build_hash;
+};
+
+class VersionParser {
+public:
+    static Status parse(const std::string& created_by,
+                        std::unique_ptr<ParsedVersion>* parsed_version);
+};
+
+class SemanticVersion {
+public:
+    SemanticVersion(int major, int minor, int patch);
+
+#ifdef BE_TEST
+    SemanticVersion(int major, int minor, int patch, bool has_unknown);
+#endif
+
+    SemanticVersion(int major, int minor, int patch, std::optional<std::string> unknown,
+                    std::optional<std::string> pre, std::optional<std::string> build_info);
+
+    static Status parse(const std::string& version,
+                        std::unique_ptr<SemanticVersion>* semantic_version);
+
+    int compare_to(const SemanticVersion& other) const;
+
+    bool operator==(const SemanticVersion& other) const;
+
+    bool operator!=(const SemanticVersion& other) const;
+
+    std::string to_string() const;
+
+private:
+    class NumberOrString {
+    public:
+        explicit NumberOrString(const std::string& value_string);
+
+        NumberOrString(const NumberOrString& other);
+
+        int compare_to(const NumberOrString& that) const;
+        std::string to_string() const;
+
+        bool operator<(const NumberOrString& that) const;
+        bool operator==(const NumberOrString& that) const;
+        bool operator!=(const NumberOrString& that) const;
+        bool operator>(const NumberOrString& that) const;
+        bool operator<=(const NumberOrString& that) const;
+        bool operator>=(const NumberOrString& that) const;
+
+    private:
+        std::string _original;
+        bool _is_numeric;
+        int _number;
+    };
+
+    class Prerelease {
+    public:
+        explicit Prerelease(std::string original);
+
+        int compare_to(const Prerelease& that) const;
+        std::string to_string() const;
+
+        bool operator<(const Prerelease& that) const;
+        bool operator==(const Prerelease& that) const;
+        bool operator!=(const Prerelease& that) const;
+        bool operator>(const Prerelease& that) const;
+        bool operator<=(const Prerelease& that) const;
+        bool operator>=(const Prerelease& that) const;
+
+        const std::string& original() const { return _original; }
+
+    private:
+        static std::vector<std::string> _split(const std::string& s, const std::regex& delimiter);
+
+        std::string _original;
+        std::vector<NumberOrString> _identifiers;
+    };
+
+    static int _compare_integers(int x, int y);
+    static int _compare_booleans(bool x, bool y);
+
+    int _major;
+    int _minor;
+    int _patch;
+    bool _prerelease;
+    std::optional<std::string> _unknown;
+    std::optional<Prerelease> _pre;
+    std::optional<std::string> _build_info;
+};
+
+class CorruptStatistics {
+public:
+    static bool should_ignore_statistics(const std::string& created_by,
+                                         tparquet::Type::type physical_type);
+
+private:
+    static const SemanticVersion PARQUET_251_FIXED_VERSION;
+    static const SemanticVersion CDH_5_PARQUET_251_FIXED_START;
+    static const SemanticVersion CDH_5_PARQUET_251_FIXED_END;
 };
 
 } // namespace doris::vectorized

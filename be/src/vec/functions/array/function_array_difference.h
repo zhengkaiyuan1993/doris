@@ -17,8 +17,29 @@
 
 #pragma once
 
+#include <fmt/format.h>
+#include <glog/logging.h>
+#include <stddef.h>
+
+#include <algorithm>
+#include <boost/iterator/iterator_facade.hpp>
+#include <memory>
+#include <ostream>
+#include <string>
+#include <utility>
+
+#include "common/status.h"
+#include "vec/aggregate_functions/aggregate_function.h"
 #include "vec/columns/column.h"
 #include "vec/columns/column_array.h"
+#include "vec/columns/column_decimal.h"
+#include "vec/columns/column_nullable.h"
+#include "vec/columns/column_vector.h"
+#include "vec/columns/columns_number.h"
+#include "vec/common/assert_cast.h"
+#include "vec/core/block.h"
+#include "vec/core/column_numbers.h"
+#include "vec/core/column_with_type_and_name.h"
 #include "vec/core/types.h"
 #include "vec/data_types/data_type.h"
 #include "vec/data_types/data_type_array.h"
@@ -26,6 +47,10 @@
 #include "vec/data_types/data_type_number.h"
 #include "vec/functions/function.h"
 #include "vec/utils/util.hpp"
+
+namespace doris {
+class FunctionContext;
+} // namespace doris
 
 namespace doris::vectorized {
 
@@ -40,8 +65,6 @@ public:
     bool is_variadic() const override { return false; }
 
     size_t get_number_of_arguments() const override { return 1; }
-
-    bool use_default_implementation_for_nulls() const override { return true; }
 
     DataTypePtr get_return_type_impl(const DataTypes& arguments) const override {
         DCHECK(is_array(arguments[0]))
@@ -71,14 +94,15 @@ public:
             return std::make_shared<DataTypeArray>(is_nullable ? make_nullable(return_type)
                                                                : return_type);
         } else {
-            LOG(FATAL) << "Function of " << name
-                       << " return type get wrong: and input argument is: "
-                       << arguments[0]->get_name();
+            throw doris::Exception(
+                    ErrorCode::INVALID_ARGUMENT,
+                    "Function of {}, return type get wrong: and input argument is: {}", name,
+                    arguments[0]->get_name());
         }
     }
 
     Status execute_impl(FunctionContext* context, Block& block, const ColumnNumbers& arguments,
-                        size_t result, size_t input_rows_count) override {
+                        uint32_t result, size_t input_rows_count) const override {
         const ColumnWithTypeAndName& arg = block.get_by_position(arguments[0]);
         auto res_column = _execute_non_nullable(arg, input_rows_count);
         if (!res_column) {
@@ -112,7 +136,8 @@ private:
 
     template <typename Element, typename Result>
     ColumnPtr _execute_number_expanded(const ColumnArray::Offsets64& offsets,
-                                       const IColumn& nested_column, ColumnPtr nested_null_map) {
+                                       const IColumn& nested_column,
+                                       ColumnPtr nested_null_map) const {
         using ColVecType = ColumnVectorOrDecimal<Element>;
         using ColVecResult = ColumnVectorOrDecimal<Result>;
         typename ColVecResult::MutablePtr res_nested = nullptr;
@@ -153,7 +178,8 @@ private:
         }
     }
 
-    ColumnPtr _execute_non_nullable(const ColumnWithTypeAndName& arg, size_t input_rows_count) {
+    ColumnPtr _execute_non_nullable(const ColumnWithTypeAndName& arg,
+                                    size_t input_rows_count) const {
         // check array nested column type and get data
         auto left_column = arg.column->convert_to_full_column_if_const();
         const auto& array_column = reinterpret_cast<const ColumnArray&>(*left_column);
@@ -174,36 +200,45 @@ private:
         ColumnPtr res = nullptr;
         auto left_element_type =
                 remove_nullable(assert_cast<const DataTypeArray&>(*arg.type).get_nested_type());
-        if (check_column<ColumnUInt8>(*nested_column)) {
+        WhichDataType which_type(left_element_type);
+        if (which_type.is_uint8()) {
             res = _execute_number_expanded<UInt8, Int16>(offsets, *nested_column, nested_null_map);
-        } else if (check_column<ColumnInt8>(*nested_column)) {
+        } else if (which_type.is_int8()) {
             res = _execute_number_expanded<Int8, Int16>(offsets, *nested_column, nested_null_map);
-        } else if (check_column<ColumnInt16>(*nested_column)) {
+        } else if (which_type.is_int16()) {
             res = _execute_number_expanded<Int16, Int32>(offsets, *nested_column, nested_null_map);
-        } else if (check_column<ColumnInt32>(*nested_column)) {
+        } else if (which_type.is_int32()) {
             res = _execute_number_expanded<Int32, Int64>(offsets, *nested_column, nested_null_map);
-        } else if (check_column<ColumnInt64>(*nested_column)) {
+        } else if (which_type.is_int64()) {
             res = _execute_number_expanded<Int64, Int128>(offsets, *nested_column, nested_null_map);
-        } else if (check_column<ColumnInt128>(*nested_column)) {
+        } else if (which_type.is_int128()) {
             res = _execute_number_expanded<Int128, Int128>(offsets, *nested_column,
                                                            nested_null_map);
-        } else if (check_column<ColumnFloat32>(*nested_column)) {
+        } else if (which_type.is_float32()) {
             res = _execute_number_expanded<Float32, Float64>(offsets, *nested_column,
                                                              nested_null_map);
-        } else if (check_column<ColumnFloat64>(*nested_column)) {
+        } else if (which_type.is_float64()) {
             res = _execute_number_expanded<Float64, Float64>(offsets, *nested_column,
                                                              nested_null_map);
-        } else if (check_column<ColumnDecimal32>(*nested_column)) {
+        } else if (which_type.is_decimal32()) {
             res = _execute_number_expanded<Decimal32, Decimal32>(offsets, *nested_column,
                                                                  nested_null_map);
-        } else if (check_column<ColumnDecimal64>(*nested_column)) {
+        } else if (which_type.is_decimal64()) {
             res = _execute_number_expanded<Decimal64, Decimal64>(offsets, *nested_column,
                                                                  nested_null_map);
-        } else if (check_column<ColumnDecimal128>(*nested_column)) {
-            res = _execute_number_expanded<Decimal128, Decimal128>(offsets, *nested_column,
+        } else if (which_type.is_decimal128v3()) {
+            res = _execute_number_expanded<Decimal128V3, Decimal128V3>(offsets, *nested_column,
+                                                                       nested_null_map);
+        } else if (which_type.is_decimal128v2()) {
+            res = _execute_number_expanded<Decimal128V2, Decimal128V2>(offsets, *nested_column,
+                                                                       nested_null_map);
+        } else if (which_type.is_decimal256()) {
+            res = _execute_number_expanded<Decimal256, Decimal256>(offsets, *nested_column,
                                                                    nested_null_map);
+        } else {
+            return nullptr;
         }
-        return ColumnArray::create(std::move(res), array_column.get_offsets_ptr());
+        return ColumnArray::create(res, array_column.get_offsets_ptr());
     }
 };
 

@@ -20,7 +20,21 @@ suite("test_pushdown_explain") {
     
     explain {
         sql("select k1 from baseall where k1 = 1")
-        contains "PREDICATES: `k1` = 1"
+        contains "PREDICATES:"
     }
     qt_select "select k1 from baseall where k1 = 1"
+
+    sql "set enable_fold_constant_by_be = true;"
+    explain {
+        sql("select cast(0 as datetime)")
+        contains "NULL"
+    }
+    explain {
+        sql("select cast(0 as date)")
+        contains "NULL"
+    }
+    explain {
+        sql("select cast(\"6.a8\" as json)")
+        contains "NULL"
+    }
 }

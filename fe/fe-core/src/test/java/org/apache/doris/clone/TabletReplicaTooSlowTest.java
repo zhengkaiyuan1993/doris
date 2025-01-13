@@ -67,13 +67,14 @@ public class TabletReplicaTooSlowTest {
 
     private final SystemInfoService systemInfoService = new SystemInfoService();
     private final TabletInvertedIndex invertedIndex = new TabletInvertedIndex();
-    private Table<String, Tag, ClusterLoadStatistic> statisticMap;
+    private Table<String, Tag, LoadStatisticForTag> statisticMap;
 
     @BeforeClass
     public static void beforeClass() throws Exception {
+        FeConstants.runningUnitTest = true;
         System.out.println(runningDir);
         FeConstants.runningUnitTest = true;
-        FeConstants.tablet_checker_interval_ms = 1000;
+        Config.tablet_checker_interval_ms = 1000;
         Config.tablet_repair_delay_factor_second = 1;
         Config.repair_slow_replica = true;
         // 5 backends:
@@ -91,7 +92,7 @@ public class TabletReplicaTooSlowTest {
         Env.getCurrentEnv().createDb(createDbStmt);
 
         // must set disk info, or the tablet scheduler won't work
-        backends = Env.getCurrentSystemInfo().getClusterBackends(SystemInfoService.DEFAULT_CLUSTER);
+        backends = Env.getCurrentSystemInfo().getAllBackendsByAllCluster().values().asList();
         for (Backend be : backends) {
             Map<String, TDisk> backendDisks = Maps.newHashMap();
             TDisk tDisk1 = new TDisk();
@@ -140,7 +141,7 @@ public class TabletReplicaTooSlowTest {
             List<Long> pathHashes = be.getDisks().values().stream()
                     .map(DiskInfo::getPathHash).collect(Collectors.toList());
             Replica replica = cell.getValue();
-            replica.setVersionCount(versionCount);
+            replica.setVisibleVersionCount(versionCount);
             versionCount = versionCount + 200;
 
             replica.setPathHash(pathHashes.get(0));
@@ -170,7 +171,7 @@ public class TabletReplicaTooSlowTest {
             boolean found = false;
             for (Table.Cell<Long, Long, Replica> cell : replicaMetaTable.cellSet()) {
                 Replica replica = cell.getValue();
-                if (replica.getVersionCount() == 401) {
+                if (replica.getVisibleVersionCount() == 401) {
                     if (replica.tooSlow()) {
                         LOG.info("set to TOO_SLOW.");
                     }

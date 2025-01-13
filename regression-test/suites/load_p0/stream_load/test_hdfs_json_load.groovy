@@ -15,7 +15,7 @@
 // specific language governing permissions and limitations
 // under the License.
 
-suite("test_hdfs_json_load", "p0") {
+suite("test_hdfs_json_load", "p0,external,external_docker,external_docker_hive,hive") {
     // define a sql table
     def testTable = "test_hdfs_json_load"
     
@@ -44,10 +44,7 @@ suite("test_hdfs_json_load", "p0") {
 
     def load_from_hdfs1 = {new_json_reader_flag, strip_flag, fuzzy_flag, testTablex, label, fileName,
                             fsPath, hdfsUser, exprs, jsonpaths, json_root, columns_parameter, where ->
-        // should be delete after new_load_scan is ready
-        sql """ADMIN SET FRONTEND CONFIG ("enable_new_load_scan_node" = "${new_json_reader_flag}");"""
-        
-        def hdfsFilePath = "${fsPath}/user/doris/json_format_test/${fileName}"
+        def hdfsFilePath = "${fsPath}/user/doris/preinstalled_data/json_format_test/${fileName}"
         def result1= sql """
                         LOAD LABEL ${label} (
                             DATA INFILE("${hdfsFilePath}")
@@ -72,28 +69,60 @@ suite("test_hdfs_json_load", "p0") {
                             "max_filter_ratio"="0"
                             );
                         """
+
+        println "${result1}"
         
         assertTrue(result1.size() == 1)
         assertTrue(result1[0].size() == 1)
         assertTrue(result1[0][0] == 0, "Query OK, 0 rows affected")
+    }
 
-        // should be delete after new_load_scan is ready
-        sql """ADMIN SET FRONTEND CONFIG ("enable_new_load_scan_node" = "false");"""
+    def load_from_hdfs2 = {new_json_reader_flag, strip_flag, fuzzy_flag, testTablex, label, fileName,
+                           fsPath, hdfsUser, exprs, jsonpaths, json_root, columns_parameter, where ->
+        def hdfsFilePath = "${fsPath}/user/doris/preinstalled_data/json_format_test/${fileName}"
+        def result1= sql """
+                        LOAD LABEL ${label} (
+                            DATA INFILE("${hdfsFilePath}")
+                            INTO TABLE ${testTablex} 
+                            FORMAT as "json"
+                            ${columns_parameter}
+                            ${exprs}
+                            ${where}
+                            properties(
+                                "json_root" = "${json_root}",
+                                "jsonpaths" = "${jsonpaths}",
+                                "strip_outer_array" = "${strip_flag}",
+                                "fuzzy_parse" = "${fuzzy_flag}"
+                                )
+                            )
+                        with HDFS (
+                            "hadoop.username" = "${hdfsUser}"
+                            )
+                        PROPERTIES (
+                            "timeout"="1200"
+                            );
+                        """
+
+        println "${result1}"
+
+        assertTrue(result1.size() == 1)
+        assertTrue(result1[0].size() == 1)
+        assertTrue(result1[0][0] == 0, "Query OK, 0 rows affected")
     }
 
     def check_load_result = {checklabel, testTablex ->
-        max_try_milli_secs = 10000
+        def max_try_milli_secs = 30000
         while(max_try_milli_secs) {
-            result = sql "show load where label = '${checklabel}'"
+            def result = sql "show load where label = '${checklabel}'"
             if(result[0][2] == "FINISHED") {
-                log.info("LOAD FINISHED!")
+                log.info("LOAD FINISHED: ${checklabel}")
                 break
             } else {
                 sleep(1000) // wait 1 second every time
                 max_try_milli_secs -= 1000
                 if(max_try_milli_secs <= 0) {
                     log.info("Broker load result: ${result}".toString())
-                    assertEquals(1, 2)
+                    assertEquals(1 == 2, "load timeout: ${checklabel}")
                 }
             }
         }
@@ -101,8 +130,9 @@ suite("test_hdfs_json_load", "p0") {
     
 
 
-    String hdfs_port = context.config.otherConfigs.get("hdfs_port")
-    def fsPath = "hdfs://127.0.0.1:${hdfs_port}"
+    String hdfs_port = context.config.otherConfigs.get("hive2HdfsPort")
+    String externalEnvIp = context.config.otherConfigs.get("externalEnvIp")
+    def fsPath = "hdfs://${externalEnvIp}:${hdfs_port}"
     // It's okay to use random `hdfsUser`, but can not be empty.
     def hdfsUser = "doris"
 
@@ -517,7 +547,23 @@ suite("test_hdfs_json_load", "p0") {
         }
     }
 
+    // case15: verify no default FS properties
+    def q15 = {
+        try {
+            def test_load_label1 = UUID.randomUUID().toString().replaceAll("-", "")
+            sql "DROP TABLE IF EXISTS ${testTable}"
+            create_test_table1.call(testTable)
+            load_from_hdfs2.call("false", "false", "false", testTable, test_load_label1, "nest_json.json", fsPath, hdfsUser,
+                    "SET(id = id * 10)", """[\\"\$.id\\", \\"\$.code\\",\\"\$.city\\"]""", '$.item',
+                    '(id, code, city)', 'WHERE id>20')
 
+            check_load_result(test_load_label1, testTable)
+            sql "sync"
+            qt_select15 "select * from ${testTable} order by id"
+        } finally {
+            try_sql("DROP TABLE IF EXISTS ${testTable}")
+        }
+    }
 
     
     String enabled = context.config.otherConfigs.get("enableHiveTest")
@@ -550,5 +596,7 @@ suite("test_hdfs_json_load", "p0") {
         q13()
         log.info("Begin Test q14:")
         q14()
+        log.info("Begin Test q15:")
+        q15()
     }
 }

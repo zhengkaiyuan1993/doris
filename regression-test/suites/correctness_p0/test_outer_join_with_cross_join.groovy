@@ -97,6 +97,38 @@ suite("test_outer_join_with_cross_join") {
         inner join test_outer_join_with_cross_join_outerjoin_C on true left join test_outer_join_with_cross_join_outerjoin_D on test_outer_join_with_cross_join_outerjoin_B.a = test_outer_join_with_cross_join_outerjoin_D.a;
     """
 
+    qt_select2 """
+        select
+        subq_0.`c3` as c0
+        from
+        (
+            select
+            ref_0.a as c3,
+            unhex(cast(version() as varchar)) as c4
+            from
+            test_outer_join_with_cross_join_outerjoin_A as ref_0
+        ) as subq_0
+        right join test_outer_join_with_cross_join_outerjoin_B as ref_3 on (subq_0.`c3` = ref_3.a)
+        inner join test_outer_join_with_cross_join_outerjoin_C as ref_4 on true;
+    """
+
+    qt_select3 """
+                WITH a As(
+                    select
+                        (case
+                            when '年' = '年' then DATE_FORMAT(date_sub(concat('2023', '-01-01'), interval 0 year), '%Y')
+
+                            end) as startdate,
+                        (case
+                            when '年' = '年' then DATE_FORMAT(date_sub(concat('2023', '-01-01'), interval 0 year), '%Y')
+
+                            end) as enddate
+                )
+                select * from test_outer_join_with_cross_join_outerjoin_A DMR_POTM cross join a
+                right join ( select distinct a from test_outer_join_with_cross_join_outerjoin_B ) DD
+                on DMR_POTM.a =DD.a;
+                """
+
     sql """
         drop table if exists test_outer_join_with_cross_join_outerjoin_A;
     """

@@ -19,8 +19,8 @@ package org.apache.doris.analysis;
 
 import org.apache.doris.common.AnalysisException;
 import org.apache.doris.common.UserException;
+import org.apache.doris.mysql.privilege.AccessControllerManager;
 import org.apache.doris.mysql.privilege.MockedAuth;
-import org.apache.doris.mysql.privilege.PaloAuth;
 import org.apache.doris.qe.ConnectContext;
 
 import mockit.Mocked;
@@ -32,15 +32,15 @@ public class SetPassVarTest {
     private Analyzer analyzer;
 
     @Mocked
-    private PaloAuth auth;
+    private AccessControllerManager accessManager;
     @Mocked
     private ConnectContext ctx;
 
     @Before
     public void setUp() {
-        analyzer = AccessTestUtil.fetchAdminAnalyzer(true);
-        MockedAuth.mockedAuth(auth);
+        MockedAuth.mockedAccess(accessManager);
         MockedAuth.mockedConnectContext(ctx, "root", "192.168.1.1");
+        analyzer = AccessTestUtil.fetchAdminAnalyzer(true);
         UserIdentity currentUser = new UserIdentity("root", "192.168.1.1");
         currentUser.setIsAnalyzed();
         ctx.setCurrentUserIdentity(currentUser);
@@ -54,15 +54,15 @@ public class SetPassVarTest {
         stmt = new SetPassVar(new UserIdentity("testUser", "%"),
                 new PassVar("*88EEBA7D913688E7278E2AD071FDB5E76D76D34B", false));
         stmt.analyze(analyzer);
-        Assert.assertEquals("testCluster:testUser", stmt.getUserIdent().getQualifiedUser());
+        Assert.assertEquals("testUser", stmt.getUserIdent().getQualifiedUser());
         Assert.assertEquals("*88EEBA7D913688E7278E2AD071FDB5E76D76D34B", new String(stmt.getPassword()));
-        Assert.assertEquals("SET PASSWORD FOR 'testCluster:testUser'@'%' = '*XXX'",
+        Assert.assertEquals("SET PASSWORD FOR 'testUser'@'%' = '*XXX'",
                 stmt.toString());
 
         // empty password
         stmt = new SetPassVar(new UserIdentity("testUser", "%"), new PassVar("", true));
         stmt.analyze(analyzer);
-        Assert.assertEquals("SET PASSWORD FOR 'testCluster:testUser'@'%' = '*XXX'", stmt.toString());
+        Assert.assertEquals("SET PASSWORD FOR 'testUser'@'%' = '*XXX'", stmt.toString());
 
         // empty user
         // empty password

@@ -16,11 +16,6 @@ xian	100.0
 20220202	10001
 20220203	10000,10001
 
--- !bitmap_intersect --
-20220201	10001
-20220202	10001
-20220203	10000,10001
-
 -- !select4 --
 3
 
@@ -45,7 +40,7 @@ beijing	3
 xian	2
 
 -- !select9 --
-beijing, xian, beijing, chengdu, shanghai
+beijing,xian,beijing,chengdu,shanghai
 
 -- !select10 --
 beijing xian beijing chengdu shanghai
@@ -54,8 +49,8 @@ beijing xian beijing chengdu shanghai
 \N
 
 -- !select12 --
-beijing, xian
-beijing, chengdu, shanghai
+beijing,xian
+beijing,chengdu,shanghai
 
 -- !select13 --
 beijing xian
@@ -92,6 +87,27 @@ beijing chengdu shanghai
 -- !select19 --
 8
 
+-- !select --
+\N
+1
+2
+3
+4
+
+-- !select --
+\N	\N
+\N	5
+1	1
+2	2
+3	3
+4	\N
+
+-- !select --
+1
+
+-- !select --
+1
+
 -- !select20 --
 1	10.0
 2	224.5
@@ -112,6 +128,27 @@ beijing chengdu shanghai
 3	10.0
 5	29.0
 6	101.0
+
+-- !select20_1 --
+1	10.1
+2	224.6
+3	10.1
+5	29.1
+6	101.1
+
+-- !select21_1 --
+1	10.1
+2	246.25
+3	10.1
+5	29.1
+6	101.1
+
+-- !select22_1 --
+1	10.1
+2	356.665
+3	10.1
+5	29.1
+6	101.1
 
 -- !select23 --
 1	10.0
@@ -224,4 +261,33 @@ beijing chengdu shanghai
 
 -- !select44 --
 6	3975	2003	33035710	25819.948	78965.368	4449.5830001831055
+
+-- !select45 --
+1	10
+2	8
+2	441
+3	10
+5	29
+6	101
+
+-- !select46 --
+5	29
+
+-- !select47 --
+6
+
+-- !select48 --
+20220201	0	1.0
+20220201	1	-1.0
+20220202	2	0.0
+
+-- !select49 --
+20220201	0	1.0
+20220201	1	1.0
+20220202	2	2500.0
+
+-- !select50 --
+20220201	0	1.0
+20220201	1	3.0
+20220202	2	4999.0
 

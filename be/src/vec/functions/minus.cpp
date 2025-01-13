@@ -18,7 +18,11 @@
 // https://github.com/ClickHouse/ClickHouse/blob/master/src/Functions/Minus.cpp
 // and modified by Doris
 
+#include <utility>
+
+#include "runtime/decimalv2_value.h"
 #include "vec/common/arithmetic_overflow.h"
+#include "vec/data_types/number_traits.h"
 #include "vec/functions/function_binary_arithmetic.h"
 #include "vec/functions/simple_function_factory.h"
 
@@ -35,7 +39,7 @@ struct MinusImpl {
     }
 
     template <typename Result = DecimalV2Value>
-    static inline DecimalV2Value apply(DecimalV2Value a, DecimalV2Value b) {
+    static inline DecimalV2Value apply(const DecimalV2Value& a, const DecimalV2Value& b) {
         return DecimalV2Value(a.value() - b.value());
     }
 

@@ -65,6 +65,7 @@
 #include "jsonb_document.h"
 #include "jsonb_error.h"
 #include "jsonb_writer.h"
+#include "string_parser.hpp"
 
 namespace doris {
 
@@ -83,16 +84,16 @@ public:
 
     // parse a UTF-8 JSON string
     bool parse(const std::string& str, hDictInsert handler = nullptr) {
-        return parse(str.c_str(), (unsigned int)str.size(), handler);
+        return parse(str.c_str(), str.size(), handler);
     }
 
     // parse a UTF-8 JSON c-style string (NULL terminated)
     bool parse(const char* c_str, hDictInsert handler = nullptr) {
-        return parse(c_str, (unsigned int)strlen(c_str), handler);
+        return parse(c_str, strlen(c_str), handler);
     }
 
     // parse a UTF-8 JSON string with length
-    bool parse(const char* pch, unsigned int len, hDictInsert handler = nullptr) {
+    bool parse(const char* pch, size_t len, hDictInsert handler = nullptr) {
         if (!pch || len == 0) {
             err_ = JsonbErrType::E_EMPTY_DOCUMENT;
             return false;
@@ -368,8 +369,8 @@ private:
                 key[key_len++] = ch;
             }
         }
-
-        if (!in.good() || in.peek() != '"' || key_len == 0) {
+        // The JSON key can be an empty string.
+        if (!in.good() || in.peek() != '"') {
             if (key_len == JsonbKeyValue::sMaxKeyLen)
                 err_ = JsonbErrType::E_INVALID_KEY_LENGTH;
             else
@@ -664,12 +665,15 @@ private:
             case 4:
                 *--out = ((uc | 0x80) & 0xBF);
                 uc >>= 6;
+                [[fallthrough]];
             case 3:
                 *--out = ((uc | 0x80) & 0xBF);
                 uc >>= 6;
+                [[fallthrough]];
             case 2:
                 *--out = ((uc | 0x80) & 0xBF);
                 uc >>= 6;
+                [[fallthrough]];
             case 1:
                 // Mask the first byte according to the standard.
                 *--out = (uc | firstByteMark[len - 1]);
@@ -894,8 +898,12 @@ private:
         }
 
         *pbuf = 0; // set null-terminator
-        int64_t val = strtol(num_buf_, NULL, 10);
-        if (errno == ERANGE) {
+        StringParser::ParseResult parse_result = StringParser::PARSE_SUCCESS;
+        int128_t val =
+                StringParser::string_to_int<int128_t>(num_buf_, pbuf - num_buf_, &parse_result);
+        if (parse_result != StringParser::PARSE_SUCCESS) {
+            VLOG_ROW << "debug string_to_int error for " << num_buf_ << " val=" << val
+                     << " parse_result=" << parse_result;
             err_ = JsonbErrType::E_DECIMAL_OVERFLOW;
             return false;
         }
@@ -910,8 +918,11 @@ private:
         } else if (val >= std::numeric_limits<int32_t>::min() &&
                    val <= std::numeric_limits<int32_t>::max()) {
             size = writer_.writeInt32((int32_t)val);
-        } else { // val <= INT64_MAX
-            size = writer_.writeInt64(val);
+        } else if (val >= std::numeric_limits<int64_t>::min() &&
+                   val <= std::numeric_limits<int64_t>::max()) {
+            size = writer_.writeInt64((int64_t)val);
+        } else { // INT128
+            size = writer_.writeInt128(val);
         }
 
         if (size == 0) {
@@ -950,7 +961,7 @@ private:
         }
 
         *pbuf = 0; // set null-terminator
-        return internConvertBufferToDouble();
+        return internConvertBufferToDouble(num_buf_, pbuf - num_buf_);
     }
 
     // parse the exponent part of a double number
@@ -990,15 +1001,17 @@ private:
         }
 
         *pbuf = 0; // set null-terminator
-        return internConvertBufferToDouble();
+        return internConvertBufferToDouble(num_buf_, pbuf - num_buf_);
     }
 
     // call system function to parse double to string
-    bool internConvertBufferToDouble() {
-        double val = strtod(num_buf_, NULL);
-
-        if (errno == ERANGE) {
-            err_ = JsonbErrType::E_DOUBLE_OVERFLOW;
+    bool internConvertBufferToDouble(char* num_buf_, int len) {
+        StringParser::ParseResult parse_result = StringParser::PARSE_SUCCESS;
+        double val = StringParser::string_to_float<double>(num_buf_, len, &parse_result);
+        if (parse_result != StringParser::PARSE_SUCCESS) {
+            VLOG_ROW << "debug string_to_float error for " << num_buf_ << " val=" << val
+                     << " parse_result=" << parse_result;
+            err_ = JsonbErrType::E_DECIMAL_OVERFLOW;
             return false;
         }
 

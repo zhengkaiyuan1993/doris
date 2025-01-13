@@ -18,7 +18,6 @@
 package org.apache.doris.analysis;
 
 import org.apache.doris.catalog.Env;
-import org.apache.doris.cluster.ClusterNamespace;
 import org.apache.doris.common.AnalysisException;
 import org.apache.doris.common.ErrorCode;
 import org.apache.doris.common.ErrorReport;
@@ -33,7 +32,7 @@ import com.google.common.collect.ImmutableSet;
 import java.util.Map;
 import java.util.Optional;
 
-public class CreateFileStmt extends DdlStmt {
+public class CreateFileStmt extends DdlStmt implements NotFallbackInParser {
     public static final String PROP_CATALOG_DEFAULT = "DEFAULT";
     private static final String PROP_CATALOG = "catalog";
     private static final String PROP_URL = "url";
@@ -90,17 +89,12 @@ public class CreateFileStmt extends DdlStmt {
         super.analyze(analyzer);
 
         // check operation privilege
-        if (!Env.getCurrentEnv().getAuth().checkGlobalPriv(ConnectContext.get(), PrivPredicate.ADMIN)) {
+        if (!Env.getCurrentEnv().getAccessManager().checkGlobalPriv(ConnectContext.get(), PrivPredicate.ADMIN)) {
             ErrorReport.reportAnalysisException(ErrorCode.ERR_SPECIFIC_ACCESS_DENIED_ERROR, "ADMIN");
         }
 
         if (dbName == null) {
             dbName = analyzer.getDefaultDb();
-        } else {
-            if (Strings.isNullOrEmpty(analyzer.getClusterName())) {
-                ErrorReport.reportAnalysisException(ErrorCode.ERR_CLUSTER_NAME_NULL);
-            }
-            dbName = ClusterNamespace.getFullName(analyzer.getClusterName(), dbName);
         }
 
         if (Strings.isNullOrEmpty(dbName)) {
@@ -167,5 +161,10 @@ public class CreateFileStmt extends DdlStmt {
     @Override
     public RedirectStatus getRedirectStatus() {
         return RedirectStatus.FORWARD_WITH_SYNC;
+    }
+
+    @Override
+    public StmtType stmtType() {
+        return StmtType.CREATE;
     }
 }

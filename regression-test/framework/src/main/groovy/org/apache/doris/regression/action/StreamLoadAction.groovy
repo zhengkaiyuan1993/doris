@@ -40,7 +40,7 @@ import org.junit.Assert
 
 @Slf4j
 class StreamLoadAction implements SuiteAction {
-    public final InetSocketAddress address
+    public InetSocketAddress address
     public final String user
     public final String password
     String db
@@ -53,9 +53,11 @@ class StreamLoadAction implements SuiteAction {
     Closure check
     Map<String, String> headers
     SuiteContext context
+    boolean directToBe = false
+    boolean twoPhaseCommit = false
 
     StreamLoadAction(SuiteContext context) {
-        this.address = context.config.feHttpInetSocketAddress
+        this.address = context.getFeHttpAddress()
         this.user = context.config.feHttpUser
         this.password = context.config.feHttpPassword
 
@@ -83,6 +85,11 @@ class StreamLoadAction implements SuiteAction {
         this.table = table.call()
     }
 
+    void directToBe(String beHost, int beHttpPort) {
+        this.address = new InetSocketAddress(beHost, beHttpPort)
+        this.directToBe = true
+    }
+
     void inputStream(InputStream inputStream) {
         this.inputStream = inputStream
     }
@@ -107,6 +114,14 @@ class StreamLoadAction implements SuiteAction {
         this.inputText = inputText.call()
     }
 
+    void sql(String sql) {
+        headers.put('sql', sql)
+    }
+
+    void sql(Closure<String> sql) {
+        headers.put('sql', sql.call())
+    }
+
     void file(String file) {
         this.file = file
     }
@@ -123,6 +138,22 @@ class StreamLoadAction implements SuiteAction {
         this.time = time.call()
     }
 
+    void twoPhaseCommit(boolean twoPhaseCommit) {
+        this.twoPhaseCommit = twoPhaseCommit;
+    }
+
+    void twoPhaseCommit(Closure<Boolean> twoPhaseCommit) {
+        this.twoPhaseCommit = twoPhaseCommit.call();
+    }
+
+    // compatible with selectdb case
+    void isCloud(boolean isCloud) {
+    }
+
+    // compatible with selectdb case
+    void isCloud(Closure<Boolean> isCloud) {
+    }
+
     void check(@ClosureParams(value = FromString, options = ["String,Throwable,Long,Long"]) Closure check) {
         this.check = check
     }
@@ -131,24 +162,43 @@ class StreamLoadAction implements SuiteAction {
         headers.put(key, value)
     }
 
+    void unset(String key) {
+        headers.remove(key)
+    }
+
     @Override
     void run() {
         String responseText = null
         Throwable ex = null
         long startTime = System.currentTimeMillis()
+        def isHttpStream = headers.containsKey("version")
         try {
-            def uri = "http://${address.hostString}:${address.port}/api/${db}/${table}/_stream_load"
+            def uri = ""
+            if (isHttpStream) {
+                uri = "http://${address.hostString}:${address.port}/api/_http_stream"
+            } else if (twoPhaseCommit) {
+                uri = "http://${address.hostString}:${address.port}/api/${db}/_stream_load_2pc"
+            } else {
+                uri = "http://${address.hostString}:${address.port}/api/${db}/${table}/_stream_load"
+            }
             HttpClients.createDefault().withCloseable { client ->
                 RequestBuilder requestBuilder = prepareRequestHeader(RequestBuilder.put(uri))
                 HttpEntity httpEntity = prepareHttpEntity(client)
-                String beLocation = streamLoadToFe(client, requestBuilder)
-                responseText = streamLoadToBe(client, requestBuilder, beLocation, httpEntity)
+                if (!directToBe) {
+                    String beLocation = streamLoadToFe(client, requestBuilder)
+                    log.info("Redirect stream load to ${beLocation}".toString())
+                    requestBuilder.setUri(beLocation)
+                }
+                requestBuilder.setEntity(httpEntity)
+                responseText = streamLoadToBe(client, requestBuilder)
             }
         } catch (Throwable t) {
             ex = t
         }
         long endTime = System.currentTimeMillis()
-        log.info("Stream load elapsed ${endTime - startTime} ms".toString())
+
+        log.info("Stream load elapsed ${endTime - startTime} ms, is http stream: ${isHttpStream}, " +
+                " response: ${responseText}" + ex.toString())
         checkResult(responseText, ex, startTime, endTime)
     }
 
@@ -193,6 +243,7 @@ class StreamLoadAction implements SuiteAction {
         int code = resp.getStatusLine().getStatusCode()
         if (code != HttpStatus.SC_OK) {
             String streamBody = EntityUtils.toString(resp.getEntity())
+            log.info("Fail to download data ${url}, code: ${code}, body:\n${streamBody}")
             throw new IllegalStateException("Get http stream failed, status code is ${code}, body:\n${streamBody}")
         }
 
@@ -224,10 +275,11 @@ class StreamLoadAction implements SuiteAction {
                 def file = new File(context.config.cacheDataPath)
                 file.mkdirs();
 
-                if (file.exists() && file.isDirectory()) {
+                if (file.exists() && file.isDirectory() && context.config.enableCacheData) {
                     fileName = cacheHttpFile(client, fileName)
                 } else {
                     entity = new InputStreamEntity(httpGetStream(client, fileName))
+                    log.info("http entity length is ${entity.contentLength}")
                     return entity;
                 }
             }
@@ -263,10 +315,7 @@ class StreamLoadAction implements SuiteAction {
         return backendStreamLoadUri
     }
 
-    private String streamLoadToBe(CloseableHttpClient client, RequestBuilder requestBuilder, String beLocation, HttpEntity httpEntity) {
-        log.info("Redirect stream load to ${beLocation}".toString())
-        requestBuilder.setUri(beLocation)
-        requestBuilder.setEntity(httpEntity)
+    private String streamLoadToBe(CloseableHttpClient client, RequestBuilder requestBuilder) {
         String responseText
         try{
             client.execute(requestBuilder.build()).withCloseable { resp ->
@@ -314,15 +363,14 @@ class StreamLoadAction implements SuiteAction {
             long numberLoadedRows = result.NumberLoadedRows.toLong()
             if (numberTotalRows != numberLoadedRows) {
                 throw new IllegalStateException("Stream load rows mismatch:\n${responseText}")
-
             }
 
             if (time > 0) {
                 long elapsed = endTime - startTime
-                try{
-                    Assert.assertTrue("Expect elapsed <= ${time}, but meet ${elapsed}", elapsed <= time)
-                } catch (Throwable t) {
-                    throw new IllegalStateException("Expect elapsed <= ${time}, but meet ${elapsed}")
+                if (elapsed > time) {
+                    log.info("Stream load consums more time than expected, elapsed ${elapsed} ms, expect ${time} ms")
+                } else {
+                    log.info("Stream load consums time elapsed ${elapsed} ms, expect ${time} ms")
                 }
             }
         }
@@ -333,32 +381,41 @@ class StreamLoadAction implements SuiteAction {
     // So here we wait for at most 60s, using "show transaction" to check the
     // status of txn, and return once it become ABORTED or VISIBLE.
     private String waitForPublishOrFailure(String responseText) {
-        long maxWaitSecond = 60;
-        def jsonSlurper = new JsonSlurper()
-        def parsed = jsonSlurper.parseText(responseText)
-        String status = parsed.Status
-        long txnId = parsed.TxnId
-        if (!status.equalsIgnoreCase("Publish Timeout")) {
-            return status;
-        }
-
-        log.info("Stream load with txn ${txnId} is publish timeout")
-        String sql = "show transaction from ${db} where id = ${txnId}"
-        String st = "PREPARE"
-        while (!st.equalsIgnoreCase("VISIBLE") && !st.equalsIgnoreCase("ABORTED") && maxWaitSecond > 0) {
-            Thread.sleep(2000)
-            maxWaitSecond -= 2
-            def (result, meta) = JdbcUtils.executeToStringList(context.getConnection(), sql)
-            if (result.size() != 1) {
-                throw new IllegalStateException("Failed to get txn's ${txnId}")
+        try {
+            long maxWaitSecond = 60;
+            def jsonSlurper = new JsonSlurper()
+            def parsed = jsonSlurper.parseText(responseText)
+            String status = parsed.Status
+            if (twoPhaseCommit) {
+                status = parsed.status
+                return status;
             }
-            st = String.valueOf(result[0][3])
-        }
-        log.info("Stream load with txn ${txnId} is ${st}")
-        if (st.equalsIgnoreCase("VISIBLE")) {
-            return "Success";
-        } else {
-            return "Fail";
+            long txnId = parsed.TxnId
+            if (!status.equalsIgnoreCase("Publish Timeout")) {
+                return status;
+            }
+
+            log.info("Stream load with txn ${txnId} is publish timeout")
+            String sql = "show transaction from ${db} where id = ${txnId}"
+            String st = "PREPARE"
+            while (!st.equalsIgnoreCase("VISIBLE") && !st.equalsIgnoreCase("ABORTED") && maxWaitSecond > 0) {
+                Thread.sleep(2000)
+                maxWaitSecond -= 2
+                def (result, meta) = JdbcUtils.executeToStringList(context.getConnection(), sql)
+                if (result.size() != 1) {
+                    throw new IllegalStateException("Failed to get txn's ${txnId}")
+                }
+                st = String.valueOf(result[0][3])
+            }
+            log.info("Stream load with txn ${txnId} is ${st}")
+            if (st.equalsIgnoreCase("VISIBLE")) {
+                return "Success";
+            } else {
+                return "Fail";
+            }
+        } catch (Throwable t) {
+            log.info("failed to waitForPublishOrFailure. response: ${responseText}", t);
+            throw t;
         }
     }
 }

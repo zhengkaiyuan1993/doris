@@ -36,7 +36,7 @@ import lombok.Getter;
  **/
 @AllArgsConstructor
 @Getter
-public class ShowCreateMaterializedViewStmt extends ShowStmt {
+public class ShowCreateMaterializedViewStmt extends ShowStmt implements NotFallbackInParser {
 
     private static final ShowResultSetMetaData META_DATA =
             ShowResultSetMetaData.builder()
@@ -55,8 +55,9 @@ public class ShowCreateMaterializedViewStmt extends ShowStmt {
         tableName.analyze(analyzer);
         // disallow external catalog
         Util.prohibitExternalCatalog(tableName.getCtl(), this.getClass().getSimpleName());
-        if (!Env.getCurrentEnv().getAuth()
-                .checkTblPriv(ConnectContext.get(), tableName.getDb(), tableName.getTbl(), PrivPredicate.SHOW)) {
+        if (!Env.getCurrentEnv().getAccessManager()
+                .checkTblPriv(ConnectContext.get(), tableName.getCtl(), tableName.getDb(), tableName.getTbl(),
+                        PrivPredicate.SHOW)) {
             ErrorReport.reportAnalysisException(ErrorCode.ERR_TABLEACCESS_DENIED_ERROR, "SHOW CREATE MATERIALIZED",
                     ConnectContext.get().getQualifiedUser(),
                     ConnectContext.get().getRemoteIP(),
