@@ -22,6 +22,7 @@ import org.apache.doris.catalog.ScalarType;
 import org.apache.doris.catalog.Type;
 import org.apache.doris.common.AnalysisException;
 import org.apache.doris.common.Config;
+import org.apache.doris.common.FormatOptions;
 
 import org.junit.Assert;
 import org.junit.Test;
@@ -30,6 +31,15 @@ import java.math.BigDecimal;
 import java.nio.ByteBuffer;
 
 public class DecimalLiteralTest {
+
+    @Test
+    public void testGetStringInFe() {
+        BigDecimal decimal = new BigDecimal("-123456789123456789.123456789");
+        DecimalLiteral literal = new DecimalLiteral(decimal);
+        String s = literal.getStringValueInFe(FormatOptions.getDefault());
+        Assert.assertEquals("-123456789123456789.123456789", s);
+        Assert.assertEquals("-123456789123456789.123456789", literal.getStringValueInFe(FormatOptions.getForPresto()));
+    }
 
     @Test
     public void testHashValue() throws AnalysisException {
@@ -46,7 +56,7 @@ public class DecimalLiteralTest {
 
         // if DecimalLiteral need to cast to Decimal and Decimalv2, need to cast
         // to themselves
-        if (!(Config.enable_decimalv3 && Config.enable_decimal_conversion)) {
+        if (!Config.enable_decimal_conversion) {
             Assert.assertEquals(literal, literal.uncheckedCastTo(Type.DECIMALV2));
         }
 
@@ -82,5 +92,12 @@ public class DecimalLiteralTest {
         scale = ((ScalarType) literal.getType()).getScalarScale();
         Assert.assertEquals(3, precision);
         Assert.assertEquals(3, scale);
+
+        decimal = new BigDecimal("197323961.520000000000000000000000000000");
+        literal = new DecimalLiteral(decimal);
+        precision = ((ScalarType) literal.getType()).getScalarPrecision();
+        scale = ((ScalarType) literal.getType()).getScalarScale();
+        Assert.assertEquals(38, precision);
+        Assert.assertEquals(29, scale);
     }
 }

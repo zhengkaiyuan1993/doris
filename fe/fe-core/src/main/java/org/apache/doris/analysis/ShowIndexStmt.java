@@ -24,14 +24,13 @@ import org.apache.doris.common.AnalysisException;
 import org.apache.doris.common.ErrorCode;
 import org.apache.doris.common.ErrorReport;
 import org.apache.doris.common.UserException;
-import org.apache.doris.common.util.Util;
 import org.apache.doris.mysql.privilege.PrivPredicate;
 import org.apache.doris.qe.ConnectContext;
 import org.apache.doris.qe.ShowResultSetMetaData;
 
 import com.google.common.base.Strings;
 
-public class ShowIndexStmt extends ShowStmt {
+public class ShowIndexStmt extends ShowStmt implements NotFallbackInParser {
     private static final ShowResultSetMetaData META_DATA =
             ShowResultSetMetaData.builder()
                     .addColumn(new Column("Table", ScalarType.createVarchar(64)))
@@ -46,6 +45,7 @@ public class ShowIndexStmt extends ShowStmt {
                     .addColumn(new Column("Null", ScalarType.createVarchar(80)))
                     .addColumn(new Column("Index_type", ScalarType.createVarchar(80)))
                     .addColumn(new Column("Comment", ScalarType.createVarchar(80)))
+                    .addColumn(new Column("Properties", ScalarType.createVarchar(200)))
                     .build();
     private String dbName;
     private TableName tableName;
@@ -69,13 +69,11 @@ public class ShowIndexStmt extends ShowStmt {
             tableName.setDb(dbName);
         }
         tableName.analyze(analyzer);
-        // disallow external catalog
-        Util.prohibitExternalCatalog(tableName.getCtl(), this.getClass().getSimpleName());
-
-        if (!Env.getCurrentEnv().getAuth().checkTblPriv(
-                ConnectContext.get(), tableName.getDb(), tableName.getTbl(), PrivPredicate.SHOW)) {
-            ErrorReport.reportAnalysisException(ErrorCode.ERR_TABLEACCESS_DENIED_ERROR, analyzer.getQualifiedUser(),
-                    tableName.getDb() + ": " + tableName.toString());
+        if (!Env.getCurrentEnv().getAccessManager().checkTblPriv(
+                ConnectContext.get(), tableName.getCtl(), tableName.getDb(), tableName.getTbl(), PrivPredicate.SHOW)) {
+            ErrorReport.reportAnalysisException(ErrorCode.ERR_TABLEACCESS_DENIED_ERROR, "SHOW INDEX",
+                    analyzer.getQualifiedUser(), ConnectContext.get().getRemoteIP(),
+                    tableName.toSql());
         }
     }
 

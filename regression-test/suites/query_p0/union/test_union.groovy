@@ -16,6 +16,8 @@
 // under the License.
 
 suite("test_union") {
+    String suiteName = "query_union_test_union"
+    String viewName = "${suiteName}_view"
     def db = "test_query_db"
     sql "use ${db}"
 
@@ -172,14 +174,14 @@ suite("test_union") {
     // test_union_bug
     // PALO-3617
     qt_union36 """select * from (select 1 as a, 2 as b union select 3, 3) c where a = 1"""
-    sql """drop view if exists nullable"""
-    sql """CREATE VIEW `nullable` AS SELECT `a`.`k1` AS `n1`, `b`.`k2` AS `n2` 
-           FROM `default_cluster:${db}`.`baseall` a LEFT OUTER JOIN 
-           `default_cluster:${db}`.`bigtable` b ON `a`.`k1` = `b`.`k1` + 10
+    sql """drop view if exists ${viewName}"""
+    sql """CREATE VIEW `${viewName}` AS SELECT `a`.`k1` AS `n1`, `b`.`k2` AS `n2` 
+           FROM `${db}`.`baseall` a LEFT OUTER JOIN 
+           `${db}`.`bigtable` b ON `a`.`k1` = `b`.`k1` + 10
            WHERE `b`.`k2` IS NULL"""
-    order_qt_union37 """select n1 from nullable union all select n2 from nullable"""
-    qt_union38 """(select n1 from nullable) union all (select n2 from nullable order by n1) order by n1"""
-    qt_union39 """(select n1 from nullable) union all (select n2 from nullable) order by n1"""
+    order_qt_union37 """select n1 from ${viewName} union all select n2 from ${viewName}"""
+    qt_union38 """(select n1 from ${viewName}) union all (select n2 from ${viewName} order by n1) order by n1"""
+    qt_union39 """(select n1 from ${viewName}) union all (select n2 from ${viewName}) order by n1"""
 
 
     // test_union_different_column
@@ -247,7 +249,7 @@ suite("test_union") {
     check2_doris(res7, res8)
     // 不同类型不同个数
     test {
-        sql """select k1, k2 from ${tbName2} union selectk11, k10, k9  from ${tbName1} order by k1, k2"""
+        sql """select k1, k2 from ${tbName2} union select k11, k10, k9  from ${tbName1} order by k1, k2"""
         check {result, exception, startTime, endTime ->
             assertTrue(exception != null)
             logger.info(exception.message)
@@ -273,4 +275,15 @@ suite("test_union") {
         qt_union40 """(select k1 from ${new_union_table}) union (select k${idx} from ${tbName1}) order by k1"""
     }
     sql"""drop table ${new_union_table}"""
+
+    sql 'set enable_fallback_to_original_planner=false'
+    sql 'set enable_nereids_planner=true'
+    qt_union35 """select cast("2016-07-01" as date) union (select cast("2016-07-02 1:10:0" as date)) order by 1"""
+
+    qt_union36 """SELECT a,2 as a FROM (SELECT '1' as a) b where a=1;"""
+    
+    test {
+        sql 'select * from (values (1, 2, 3), (4, 5, 6)) a'
+        result([[1, 2, 3], [4, 5, 6]])
+    }
 }

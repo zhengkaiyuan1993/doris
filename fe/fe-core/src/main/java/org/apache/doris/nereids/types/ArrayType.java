@@ -18,49 +18,59 @@
 package org.apache.doris.nereids.types;
 
 import org.apache.doris.catalog.Type;
+import org.apache.doris.nereids.types.coercion.ComplexDataType;
 
 import java.util.Objects;
 
 /**
  * Array type in Nereids.
  */
-public class ArrayType extends DataType {
+public class ArrayType extends DataType implements ComplexDataType {
 
-    public static final ArrayType SYSTEM_DEFAULT = new ArrayType(NullType.INSTANCE);
+    public static final ArrayType SYSTEM_DEFAULT = new ArrayType(NullType.INSTANCE, true);
 
-    public static final int WIDTH = 32;
+    public static final int WIDTH = 64;
 
     private final DataType itemType;
+    private final boolean containsNull;
 
-    public ArrayType(DataType itemType) {
+    private ArrayType(DataType itemType, boolean containsNull) {
         this.itemType = Objects.requireNonNull(itemType, "itemType can not be null");
+        this.containsNull = containsNull;
     }
 
     public static ArrayType of(DataType itemType) {
+        return of(itemType, true);
+    }
+
+    public static ArrayType of(DataType itemType, boolean containsNull) {
         if (itemType.equals(NullType.INSTANCE)) {
             return SYSTEM_DEFAULT;
         }
-        return new ArrayType(itemType);
+        return new ArrayType(itemType, containsNull);
+    }
+
+    @Override
+    public DataType conversion() {
+        return new ArrayType(itemType.conversion(), containsNull);
+    }
+
+    public DataType getItemType() {
+        return itemType;
+    }
+
+    public boolean containsNull() {
+        return containsNull;
     }
 
     @Override
     public Type toCatalogDataType() {
-        return Type.ARRAY;
-    }
-
-    @Override
-    public boolean acceptsType(DataType other) {
-        return other instanceof ArrayType;
+        return new org.apache.doris.catalog.ArrayType(itemType.toCatalogDataType(), containsNull);
     }
 
     @Override
     public String simpleString() {
         return "array";
-    }
-
-    @Override
-    public DataType defaultConcreteType() {
-        return SYSTEM_DEFAULT;
     }
 
     @Override
@@ -75,7 +85,8 @@ public class ArrayType extends DataType {
             return false;
         }
         ArrayType arrayType = (ArrayType) o;
-        return Objects.equals(itemType, arrayType.itemType);
+        return Objects.equals(itemType, arrayType.itemType)
+                && Objects.equals(containsNull, arrayType.containsNull);
     }
 
     @Override

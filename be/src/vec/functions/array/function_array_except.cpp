@@ -15,6 +15,11 @@
 // specific language governing permissions and limitations
 // under the License.
 
+#include "vec/columns/column_const.h"
+#include "vec/common/assert_cast.h"
+#include "vec/common/string_ref.h"
+#include "vec/data_types/data_type.h"
+#include "vec/data_types/data_type_nullable.h"
 #include "vec/functions/array/function_array_binary.h"
 #include "vec/functions/array/function_array_set.h"
 #include "vec/functions/simple_function_factory.h"
@@ -56,17 +61,19 @@ struct ExceptAction {
     template <bool is_left>
     bool apply(Set& set, Set& result_set, const Element& elem) {
         if constexpr (is_left) {
-            if (!set.find(elem)) {
+            if (!set.contains(elem)) {
                 set.insert(elem);
                 return true;
             }
         } else {
-            if (!set.find(elem)) {
+            if (!set.contains(elem)) {
                 set.insert(elem);
             }
         }
         return false;
     }
+
+    void reset() { null_flag = false; }
 };
 
 using FunctionArrayExcept =

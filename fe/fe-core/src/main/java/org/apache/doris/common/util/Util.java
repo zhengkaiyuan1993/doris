@@ -19,11 +19,12 @@ package org.apache.doris.common.util;
 
 import org.apache.doris.catalog.Column;
 import org.apache.doris.catalog.PrimitiveType;
+import org.apache.doris.cloud.security.SecurityChecker;
 import org.apache.doris.common.AnalysisException;
-import org.apache.doris.common.Config;
 import org.apache.doris.common.FeNameFormat;
 import org.apache.doris.datasource.InternalCatalog;
 import org.apache.doris.qe.ConnectContext;
+import org.apache.doris.thrift.TFileCompressType;
 import org.apache.doris.thrift.TFileFormatType;
 
 import com.google.common.base.Preconditions;
@@ -40,14 +41,21 @@ import java.io.File;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.InputStreamReader;
+import java.io.PrintWriter;
+import java.io.StringWriter;
 import java.net.URL;
 import java.net.URLConnection;
+import java.nio.ByteBuffer;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
+import java.security.SecureRandom;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.Random;
+import java.util.Objects;
+import java.util.function.LongUnaryOperator;
 import java.util.function.Predicate;
 
 public class Util {
@@ -76,18 +84,36 @@ public class Util {
         TYPE_STRING_MAP.put(PrimitiveType.DATETIMEV2, "datetimev2");
         TYPE_STRING_MAP.put(PrimitiveType.CHAR, "char(%d)");
         TYPE_STRING_MAP.put(PrimitiveType.VARCHAR, "varchar(%d)");
-        TYPE_STRING_MAP.put(PrimitiveType.JSONB, "jsonb");
+        TYPE_STRING_MAP.put(PrimitiveType.JSONB, "json");
         TYPE_STRING_MAP.put(PrimitiveType.STRING, "string");
-        TYPE_STRING_MAP.put(PrimitiveType.DECIMALV2, "decimal(%d,%d)");
-        TYPE_STRING_MAP.put(PrimitiveType.DECIMAL32, "decimal(%d,%d)");
-        TYPE_STRING_MAP.put(PrimitiveType.DECIMAL64, "decimal(%d,%d)");
-        TYPE_STRING_MAP.put(PrimitiveType.DECIMAL128, "decimal(%d,%d)");
+        TYPE_STRING_MAP.put(PrimitiveType.DECIMALV2, "decimal(%d, %d)");
+        TYPE_STRING_MAP.put(PrimitiveType.DECIMAL32, "decimal(%d, %d)");
+        TYPE_STRING_MAP.put(PrimitiveType.DECIMAL64, "decimal(%d, %d)");
+        TYPE_STRING_MAP.put(PrimitiveType.DECIMAL128, "decimal(%d, %d)");
+        TYPE_STRING_MAP.put(PrimitiveType.DECIMAL256, "decimal(%d, %d)");
         TYPE_STRING_MAP.put(PrimitiveType.HLL, "varchar(%d)");
         TYPE_STRING_MAP.put(PrimitiveType.BOOLEAN, "bool");
         TYPE_STRING_MAP.put(PrimitiveType.BITMAP, "bitmap");
         TYPE_STRING_MAP.put(PrimitiveType.QUANTILE_STATE, "quantile_state");
-        TYPE_STRING_MAP.put(PrimitiveType.ARRAY, "Array<%s>");
+        TYPE_STRING_MAP.put(PrimitiveType.AGG_STATE, "agg_state");
+        TYPE_STRING_MAP.put(PrimitiveType.ARRAY, "array<%s>");
+        TYPE_STRING_MAP.put(PrimitiveType.VARIANT, "variant");
         TYPE_STRING_MAP.put(PrimitiveType.NULL_TYPE, "null");
+    }
+
+    public static LongUnaryOperator overflowSafeIncrement() {
+        return original -> {
+            if (original == Long.MAX_VALUE) {
+                return Long.MAX_VALUE;
+            }
+            long r = original + 1;
+            if (r == Long.MAX_VALUE || ((original ^ r) & (1 ^ r)) < 0) {
+                // unbounded reached
+                return Long.MAX_VALUE;
+            } else {
+                return r;
+            }
+        };
     }
 
     private static class CmdWorker extends Thread {
@@ -239,7 +265,7 @@ public class Util {
     }
 
     public static int generateSchemaHash() {
-        return Math.abs(new Random().nextInt());
+        return Math.abs(new SecureRandom().nextInt());
     }
 
     /**
@@ -301,6 +327,7 @@ public class Util {
         StringBuilder sb = new StringBuilder();
         InputStream stream = null;
         try {
+            SecurityChecker.getInstance().startSSRFChecking(urlStr);
             URL url = new URL(urlStr);
             URLConnection conn = url.openConnection();
             if (encodedAuthInfo != null) {
@@ -328,8 +355,11 @@ public class Util {
                     return null;
                 }
             }
+            SecurityChecker.getInstance().stopSSRFChecking();
         }
-        LOG.debug("get result from url {}: {}", urlStr, sb.toString());
+        if (LOG.isDebugEnabled()) {
+            LOG.debug("get result from url {}: {}", urlStr, sb.toString());
+        }
         return sb.toString();
     }
 
@@ -394,10 +424,6 @@ public class Util {
         }
     }
 
-    public static void stdoutWithTime(String msg) {
-        System.out.println("[" + TimeUtils.longToTimeString(System.currentTimeMillis()) + "] " + msg);
-    }
-
     // not support encode negative value now
     public static void encodeVarint64(long source, DataOutput out) throws IOException {
         assert source >= 0;
@@ -447,14 +473,26 @@ public class Util {
     // If no auth info, pass a null.
     public static InputStream getInputStreamFromUrl(String urlStr, String encodedAuthInfo, int connectTimeoutMs,
             int readTimeoutMs) throws IOException {
-        URL url = new URL(urlStr);
-        URLConnection conn = url.openConnection();
-        if (encodedAuthInfo != null) {
-            conn.setRequestProperty("Authorization", "Basic " + encodedAuthInfo);
+        boolean needSecurityCheck = !(urlStr.startsWith("/") || urlStr.startsWith("file://"));
+        try {
+            if (needSecurityCheck) {
+                SecurityChecker.getInstance().startSSRFChecking(urlStr);
+            }
+            URL url = new URL(urlStr);
+            URLConnection conn = url.openConnection();
+            if (encodedAuthInfo != null) {
+                conn.setRequestProperty("Authorization", "Basic " + encodedAuthInfo);
+            }
+            conn.setConnectTimeout(connectTimeoutMs);
+            conn.setReadTimeout(readTimeoutMs);
+            return conn.getInputStream();
+        } catch (Exception e) {
+            throw new IOException(e);
+        } finally {
+            if (needSecurityCheck) {
+                SecurityChecker.getInstance().stopSSRFChecking();
+            }
         }
-        conn.setConnectTimeout(connectTimeoutMs);
-        conn.setReadTimeout(readTimeoutMs);
-        return conn.getInputStream();
     }
 
     public static boolean showHiddenColumns() {
@@ -472,21 +510,9 @@ public class Util {
     }
 
     /**
-     * Multi-catalog feature is in experiment, and should be enabled by user manually.
-     */
-    public static void checkCatalogEnabled() throws AnalysisException {
-        if (!Config.enable_multi_catalog) {
-            throw new AnalysisException("The multi-catalog feature is still in experiment, and you can enable it "
-                    + "manually by set fe configuration named `enable_multi_catalog` to be ture.");
-        }
-    }
-
-    /**
      * Check all rules of catalog.
      */
     public static void checkCatalogAllRules(String catalog) throws AnalysisException {
-        checkCatalogEnabled();
-
         if (Strings.isNullOrEmpty(catalog)) {
             throw new AnalysisException("Catalog name is empty.");
         }
@@ -500,15 +526,6 @@ public class Util {
         if (!Strings.isNullOrEmpty(catalog) && !catalog.equals(InternalCatalog.INTERNAL_CATALOG_NAME)) {
             throw new AnalysisException(String.format("External catalog '%s' is not allowed in '%s'", catalog, msg));
         }
-    }
-
-    public static boolean isS3CompatibleStorageSchema(String schema) {
-        for (String objectStorage : Config.s3_compatible_object_storages.split(",")) {
-            if (objectStorage.equalsIgnoreCase(schema)) {
-                return true;
-            }
-        }
-        return false;
     }
 
     private static final char[] HEX_ARRAY = "0123456789ABCDEF".toCharArray();
@@ -525,23 +542,88 @@ public class Util {
 
 
     @NotNull
-    public static TFileFormatType getFileFormatType(String path) {
+    public static TFileFormatType getFileFormatTypeFromPath(String path) {
         String lowerCasePath = path.toLowerCase();
-        if (lowerCasePath.endsWith(".parquet") || lowerCasePath.endsWith(".parq")) {
+        if (lowerCasePath.contains(".parquet") || lowerCasePath.contains(".parq")) {
             return TFileFormatType.FORMAT_PARQUET;
-        } else if (lowerCasePath.endsWith(".gz")) {
-            return TFileFormatType.FORMAT_CSV_GZ;
-        } else if (lowerCasePath.endsWith(".bz2")) {
-            return TFileFormatType.FORMAT_CSV_BZ2;
-        } else if (lowerCasePath.endsWith(".lz4")) {
-            return TFileFormatType.FORMAT_CSV_LZ4FRAME;
-        } else if (lowerCasePath.endsWith(".lzo")) {
-            return TFileFormatType.FORMAT_CSV_LZOP;
-        } else if (lowerCasePath.endsWith(".deflate")) {
-            return TFileFormatType.FORMAT_CSV_DEFLATE;
+        } else if (lowerCasePath.contains(".orc")) {
+            return TFileFormatType.FORMAT_ORC;
+        } else if (lowerCasePath.contains(".json")) {
+            return TFileFormatType.FORMAT_JSON;
         } else {
             return TFileFormatType.FORMAT_CSV_PLAIN;
         }
+    }
+
+    public static TFileFormatType getFileFormatTypeFromName(String formatName) {
+        String lowerFileFormat = Objects.requireNonNull(formatName).toLowerCase();
+        if (lowerFileFormat.equals(FileFormatConstants.FORMAT_PARQUET)) {
+            return TFileFormatType.FORMAT_PARQUET;
+        } else if (lowerFileFormat.equals(FileFormatConstants.FORMAT_ORC)) {
+            return TFileFormatType.FORMAT_ORC;
+        } else if (lowerFileFormat.equals(FileFormatConstants.FORMAT_JSON)) {
+            return TFileFormatType.FORMAT_JSON;
+            // csv/csv_with_name/csv_with_names_and_types treat as csv format
+        } else if (lowerFileFormat.equals(FileFormatConstants.FORMAT_CSV)
+                || lowerFileFormat.equals(FileFormatConstants.FORMAT_CSV_WITH_NAMES)
+                || lowerFileFormat.equals(FileFormatConstants.FORMAT_CSV_WITH_NAMES_AND_TYPES)
+                // TODO: Add TEXTFILE to TFileFormatType to Support hive text file format.
+                || lowerFileFormat.equals(FileFormatConstants.FORMAT_HIVE_TEXT)) {
+            return TFileFormatType.FORMAT_CSV_PLAIN;
+        } else if (lowerFileFormat.equals(FileFormatConstants.FORMAT_WAL)) {
+            return TFileFormatType.FORMAT_WAL;
+        } else if (lowerFileFormat.equals(FileFormatConstants.FORMAT_ARROW)) {
+            return TFileFormatType.FORMAT_ARROW;
+        } else {
+            return TFileFormatType.FORMAT_UNKNOWN;
+        }
+    }
+
+    /**
+     * Infer {@link TFileCompressType} from file name.
+     *
+     * @param path of file to be inferred.
+     */
+
+    @NotNull
+    public static TFileCompressType inferFileCompressTypeByPath(String path) {
+        String lowerCasePath = path.toLowerCase();
+        if (lowerCasePath.endsWith(".gz")) {
+            return TFileCompressType.GZ;
+        } else if (lowerCasePath.endsWith(".bz2")) {
+            return TFileCompressType.BZ2;
+        } else if (lowerCasePath.endsWith(".lz4")) {
+            return TFileCompressType.LZ4FRAME;
+        } else if (lowerCasePath.endsWith(".lzo")) {
+            return TFileCompressType.LZOP;
+        } else if (lowerCasePath.endsWith(".lzo_deflate")) {
+            return TFileCompressType.LZO;
+        } else if (lowerCasePath.endsWith(".deflate")) {
+            return TFileCompressType.DEFLATE;
+        } else if (lowerCasePath.endsWith(".snappy")) {
+            return TFileCompressType.SNAPPYBLOCK;
+        } else if (lowerCasePath.endsWith(".zst") || lowerCasePath.endsWith(".zstd")) {
+            return TFileCompressType.ZSTD;
+        } else {
+            return TFileCompressType.PLAIN;
+        }
+    }
+
+    public static TFileCompressType getFileCompressType(String compressType) {
+        if (Strings.isNullOrEmpty(compressType)) {
+            return TFileCompressType.UNKNOWN;
+        }
+        final String upperCaseType = compressType.toUpperCase();
+        return TFileCompressType.valueOf(upperCaseType);
+    }
+
+    /**
+     * Pass through the compressType if it is not {@link TFileCompressType#UNKNOWN}. Otherwise, return the
+     * inferred type from path.
+     */
+    public static TFileCompressType getOrInferCompressType(TFileCompressType compressType, String path) {
+        return compressType == TFileCompressType.UNKNOWN
+                ? inferFileCompressTypeByPath(path.toLowerCase()) : compressType;
     }
 
     public static boolean isCsvFormat(TFileFormatType fileFormatType) {
@@ -549,8 +631,63 @@ public class Util {
                 || fileFormatType == TFileFormatType.FORMAT_CSV_DEFLATE
                 || fileFormatType == TFileFormatType.FORMAT_CSV_GZ
                 || fileFormatType == TFileFormatType.FORMAT_CSV_LZ4FRAME
+                || fileFormatType == TFileFormatType.FORMAT_CSV_LZ4BLOCK
+                || fileFormatType == TFileFormatType.FORMAT_CSV_SNAPPYBLOCK
                 || fileFormatType == TFileFormatType.FORMAT_CSV_LZO
                 || fileFormatType == TFileFormatType.FORMAT_CSV_LZOP
                 || fileFormatType == TFileFormatType.FORMAT_CSV_PLAIN;
+    }
+
+    public static void logAndThrowRuntimeException(Logger logger, String msg, Throwable e) {
+        logger.warn(msg, e);
+        throw new RuntimeException(msg, e);
+    }
+
+    public static String getRootCauseMessage(Throwable t) {
+        String rootCause = "unknown";
+        Throwable p = t;
+        while (p != null) {
+            String message = p.getMessage();
+            if (message == null) {
+                rootCause = p.getClass().getName();
+            } else {
+                rootCause = p.getClass().getName() + ": " + p.getMessage();
+            }
+            p = p.getCause();
+        }
+        return rootCause;
+    }
+
+    // Return the stack of the root cause
+    public static String getRootCauseStack(Throwable t) {
+        String rootStack = "unknown";
+        if (t == null) {
+            return rootStack;
+        }
+        Throwable p = t;
+        while (p.getCause() != null) {
+            p = p.getCause();
+        }
+        StringWriter sw = new StringWriter();
+        PrintWriter pw = new PrintWriter(sw);
+        p.printStackTrace(pw);
+        return sw.toString();
+    }
+
+    public static long sha256long(String str) {
+        try {
+            MessageDigest digest = MessageDigest.getInstance("SHA-256");
+            byte[] hash = digest.digest(str.getBytes());
+            ByteBuffer buffer = ByteBuffer.wrap(hash);
+            return buffer.getLong();
+        } catch (NoSuchAlgorithmException e) {
+            return str.hashCode();
+        }
+    }
+
+    // Only used for external db/table's id generation
+    // And the db/table's id must >=0, see DescriptorTable.toThrift()
+    public static long genIdByName(String... names) {
+        return Math.abs(sha256long(String.join(".", names)));
     }
 }

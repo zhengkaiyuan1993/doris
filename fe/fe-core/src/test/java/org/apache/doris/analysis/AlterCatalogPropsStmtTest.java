@@ -18,12 +18,12 @@
 package org.apache.doris.analysis;
 
 import org.apache.doris.common.AnalysisException;
-import org.apache.doris.common.Config;
 import org.apache.doris.common.DdlException;
 import org.apache.doris.common.UserException;
+import org.apache.doris.datasource.ExternalCatalog;
 import org.apache.doris.datasource.InternalCatalog;
+import org.apache.doris.mysql.privilege.AccessControllerManager;
 import org.apache.doris.mysql.privilege.MockedAuth;
-import org.apache.doris.mysql.privilege.PaloAuth;
 import org.apache.doris.qe.ConnectContext;
 
 import com.google.common.collect.Maps;
@@ -37,16 +37,15 @@ import java.util.Map;
 public class AlterCatalogPropsStmtTest {
     private Analyzer analyzer;
     @Mocked
-    private PaloAuth auth;
+    private AccessControllerManager accessManager;
     @Mocked
     private ConnectContext ctx;
 
     @Before
     public void setUp() throws DdlException {
-        Config.enable_multi_catalog = true;
-        analyzer = AccessTestUtil.fetchAdminAnalyzer(false);
-        MockedAuth.mockedAuth(auth);
+        MockedAuth.mockedAccess(accessManager);
         MockedAuth.mockedConnectContext(ctx, "root", "%");
+        analyzer = AccessTestUtil.fetchAdminAnalyzer(false);
     }
 
     @Test
@@ -56,8 +55,8 @@ public class AlterCatalogPropsStmtTest {
         props.put("hive.metastore.uris", "thrift://localhost:9083");
         AlterCatalogPropertyStmt stmt = new AlterCatalogPropertyStmt("testCatalog", props);
         stmt.analyze(analyzer);
-        Assert.assertEquals("testCatalog",  stmt.getCatalogName());
-        Assert.assertEquals(2,  stmt.getNewProperties().size());
+        Assert.assertEquals("testCatalog", stmt.getCatalogName());
+        Assert.assertEquals(2, stmt.getNewProperties().size());
     }
 
     @Test(expected = AnalysisException.class)
@@ -85,6 +84,15 @@ public class AlterCatalogPropsStmtTest {
         Map<String, String> props = Maps.newHashMap();
         props.put("hive.metastore.uris", "thrift://localhost:9083");
         AlterCatalogPropertyStmt stmt = new AlterCatalogPropertyStmt(InternalCatalog.INTERNAL_CATALOG_NAME, props);
+        stmt.analyze(analyzer);
+        Assert.fail("No exception throws.");
+    }
+
+    @Test(expected = AnalysisException.class)
+    public void testUseMetaCache() throws UserException {
+        Map<String, String> props = Maps.newHashMap();
+        props.put(ExternalCatalog.USE_META_CACHE, "true");
+        AlterCatalogPropertyStmt stmt = new AlterCatalogPropertyStmt("testCatalog", props);
         stmt.analyze(analyzer);
         Assert.fail("No exception throws.");
     }

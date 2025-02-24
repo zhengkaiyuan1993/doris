@@ -23,11 +23,11 @@ import java.util.Set;
 import java.util.TreeSet;
 
 /** used to generate pattern for PhysicalLeaf. */
-public class PhysicalLeafPatternGenerator extends PatternGenerator {
+public class PhysicalLeafPatternGenerator extends PlanPatternGenerator {
 
-    public PhysicalLeafPatternGenerator(PatternGeneratorAnalyzer analyzer,
-            ClassDeclaration opType, Set<String> parentClass) {
-        super(analyzer, opType, parentClass);
+    public PhysicalLeafPatternGenerator(PlanPatternGeneratorAnalyzer analyzer,
+            ClassDeclaration opType, Set<String> parentClass, boolean isMemoPattern) {
+        super(analyzer, opType, parentClass, isMemoPattern);
     }
 
     @Override

@@ -22,14 +22,17 @@ import org.apache.doris.nereids.properties.DistributionSpec;
 import org.apache.doris.nereids.properties.LogicalProperties;
 import org.apache.doris.nereids.properties.PhysicalProperties;
 import org.apache.doris.nereids.trees.expressions.Expression;
+import org.apache.doris.nereids.trees.expressions.Slot;
 import org.apache.doris.nereids.trees.plans.Plan;
 import org.apache.doris.nereids.trees.plans.PlanType;
+import org.apache.doris.nereids.trees.plans.PropagateFuncDeps;
 import org.apache.doris.nereids.trees.plans.visitor.PlanVisitor;
 import org.apache.doris.nereids.util.Utils;
-import org.apache.doris.statistics.StatsDeriveResult;
+import org.apache.doris.statistics.Statistics;
 
 import com.google.common.base.Preconditions;
 import com.google.common.collect.ImmutableList;
+import org.json.JSONObject;
 
 import java.util.List;
 import java.util.Optional;
@@ -37,34 +40,44 @@ import java.util.Optional;
 /**
  * Enforcer plan.
  */
-public class PhysicalDistribute<CHILD_TYPE extends Plan> extends PhysicalUnary<CHILD_TYPE> {
+public class PhysicalDistribute<CHILD_TYPE extends Plan> extends PhysicalUnary<CHILD_TYPE>
+        implements PropagateFuncDeps {
 
     protected DistributionSpec distributionSpec;
 
-    public PhysicalDistribute(DistributionSpec spec, LogicalProperties logicalProperties, CHILD_TYPE child) {
-        this(spec, Optional.empty(), logicalProperties, child);
+    public PhysicalDistribute(DistributionSpec spec, CHILD_TYPE child) {
+        this(spec, Optional.empty(), child.getLogicalProperties(), child);
     }
 
     public PhysicalDistribute(DistributionSpec spec, Optional<GroupExpression> groupExpression,
             LogicalProperties logicalProperties, CHILD_TYPE child) {
-        super(PlanType.PHYSICAL_DISTRIBUTION, groupExpression, logicalProperties, child);
+        super(PlanType.PHYSICAL_DISTRIBUTE, groupExpression, logicalProperties, child);
         this.distributionSpec = spec;
     }
 
     public PhysicalDistribute(DistributionSpec spec, Optional<GroupExpression> groupExpression,
             LogicalProperties logicalProperties, PhysicalProperties physicalProperties,
-            StatsDeriveResult statsDeriveResult, CHILD_TYPE child) {
-        super(PlanType.PHYSICAL_DISTRIBUTION, groupExpression, logicalProperties, physicalProperties, statsDeriveResult,
+            Statistics statistics, CHILD_TYPE child) {
+        super(PlanType.PHYSICAL_DISTRIBUTE, groupExpression, logicalProperties, physicalProperties, statistics,
                 child);
         this.distributionSpec = spec;
     }
 
     @Override
     public String toString() {
-        return Utils.toSqlString("PhysicalDistribute",
-                "distributionSpec", distributionSpec,
-                "stats", statsDeriveResult
+        return Utils.toSqlString("PhysicalDistribute[" + id.asInt() + "]" + getGroupIdWithPrefix(),
+                "stats", statistics,
+                "distributionSpec", distributionSpec
         );
+    }
+
+    @Override
+    public JSONObject toJson() {
+        JSONObject physicalDistributeJson = super.toJson();
+        JSONObject properties = new JSONObject();
+        properties.put("DistributionSpec", distributionSpec.toString());
+        physicalDistributeJson.put("Properties", properties);
+        return physicalDistributeJson;
     }
 
     public DistributionSpec getDistributionSpec() {
@@ -85,7 +98,8 @@ public class PhysicalDistribute<CHILD_TYPE extends Plan> extends PhysicalUnary<C
     public PhysicalDistribute<Plan> withChildren(List<Plan> children) {
         Preconditions.checkArgument(children.size() == 1);
         return new PhysicalDistribute<>(distributionSpec, Optional.empty(),
-                getLogicalProperties(), children.get(0));
+                getLogicalProperties(), physicalProperties, statistics, children.get(0));
+
     }
 
     @Override
@@ -94,15 +108,35 @@ public class PhysicalDistribute<CHILD_TYPE extends Plan> extends PhysicalUnary<C
     }
 
     @Override
-    public PhysicalDistribute<CHILD_TYPE> withLogicalProperties(Optional<LogicalProperties> logicalProperties) {
-        return new PhysicalDistribute<>(distributionSpec, Optional.empty(),
-                logicalProperties.get(), child());
+    public Plan withGroupExprLogicalPropChildren(Optional<GroupExpression> groupExpression,
+            Optional<LogicalProperties> logicalProperties, List<Plan> children) {
+        Preconditions.checkArgument(children.size() == 1);
+        return new PhysicalDistribute<>(distributionSpec, groupExpression,
+                logicalProperties.get(), children.get(0));
     }
 
     @Override
     public PhysicalDistribute<CHILD_TYPE> withPhysicalPropertiesAndStats(PhysicalProperties physicalProperties,
-            StatsDeriveResult statsDeriveResult) {
-        return new PhysicalDistribute<>(distributionSpec, Optional.empty(),
-                getLogicalProperties(), physicalProperties, statsDeriveResult, child());
+            Statistics statistics) {
+        return new PhysicalDistribute<>(distributionSpec, groupExpression,
+                getLogicalProperties(), physicalProperties, statistics, child());
+    }
+
+    @Override
+    public List<Slot> computeOutput() {
+        return child().getOutput();
+    }
+
+    @Override
+    public PhysicalDistribute<CHILD_TYPE> resetLogicalProperties() {
+        return new PhysicalDistribute<>(distributionSpec, groupExpression,
+                null, physicalProperties, statistics, child());
+    }
+
+    @Override
+    public String shapeInfo() {
+        StringBuilder builder = new StringBuilder("PhysicalDistribute");
+        builder.append("[").append(getDistributionSpec().shapeInfo()).append("]");
+        return builder.toString();
     }
 }

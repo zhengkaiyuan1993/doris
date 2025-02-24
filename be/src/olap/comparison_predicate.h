@@ -18,9 +18,12 @@
 #pragma once
 
 #include <cstdint>
+#include <type_traits>
 
 #include "olap/column_predicate.h"
 #include "olap/rowset/segment_v2/bloom_filter.h"
+#include "olap/rowset/segment_v2/inverted_index_cache.h" // IWYU pragma: keep
+#include "olap/rowset/segment_v2/inverted_index_reader.h"
 #include "olap/wrapper_field.h"
 #include "vec/columns/column_dictionary.h"
 
@@ -29,133 +32,15 @@ namespace doris {
 template <PrimitiveType Type, PredicateType PT>
 class ComparisonPredicateBase : public ColumnPredicate {
 public:
-    using T = typename PredicatePrimitiveTypeTraits<Type>::PredicateFieldType;
+    using T = typename PrimitiveTypeTraits<Type>::CppType;
     ComparisonPredicateBase(uint32_t column_id, const T& value, bool opposite = false)
             : ColumnPredicate(column_id, opposite), _value(value) {}
 
+    bool can_do_apply_safely(PrimitiveType input_type, bool is_null) const override {
+        return input_type == Type || (is_string_type(input_type) && is_string_type(Type));
+    }
+
     PredicateType type() const override { return PT; }
-
-    void evaluate(ColumnBlock* block, uint16_t* sel, uint16_t* size) const override {
-        uint16_t new_size = 0;
-        if (block->is_nullable()) {
-            for (uint16_t i = 0; i < *size; ++i) {
-                uint16_t idx = sel[i];
-                sel[new_size] = idx;
-                if constexpr (Type == TYPE_DATE) {
-                    T tmp_uint32_value = 0;
-                    memcpy((char*)(&tmp_uint32_value), block->cell(idx).cell_ptr(),
-                           sizeof(uint24_t));
-                    auto result =
-                            (!block->cell(idx).is_null() && _operator(tmp_uint32_value, _value));
-                    new_size += _opposite ? !result : result;
-                } else {
-                    const T* cell_value = reinterpret_cast<const T*>(block->cell(idx).cell_ptr());
-                    auto result = (!block->cell(idx).is_null() && _operator(*cell_value, _value));
-                    new_size += _opposite ? !result : result;
-                }
-            }
-        } else {
-            for (uint16_t i = 0; i < *size; ++i) {
-                uint16_t idx = sel[i];
-                sel[new_size] = idx;
-                if constexpr (Type == TYPE_DATE) {
-                    T tmp_uint32_value = 0;
-                    memcpy((char*)(&tmp_uint32_value), block->cell(idx).cell_ptr(),
-                           sizeof(uint24_t));
-                    auto result = _operator(tmp_uint32_value, _value);
-                    new_size += _opposite ? !result : result;
-                } else {
-                    const T* cell_value = reinterpret_cast<const T*>(block->cell(idx).cell_ptr());
-                    auto result = _operator(*cell_value, _value);
-                    new_size += _opposite ? !result : result;
-                }
-            }
-        }
-        *size = new_size;
-    }
-
-    void evaluate_or(ColumnBlock* block, uint16_t* sel, uint16_t size, bool* flags) const override {
-        if (block->is_nullable()) {
-            for (uint16_t i = 0; i < size; ++i) {
-                if (flags[i]) {
-                    continue;
-                }
-                uint16_t idx = sel[i];
-                if constexpr (Type == TYPE_DATE) {
-                    T tmp_uint32_value = 0;
-                    memcpy((char*)(&tmp_uint32_value), block->cell(idx).cell_ptr(),
-                           sizeof(uint24_t));
-                    auto result =
-                            (!block->cell(idx).is_null() && _operator(tmp_uint32_value, _value));
-                    flags[i] = flags[i] | (_opposite ? !result : result);
-                } else {
-                    const T* cell_value = reinterpret_cast<const T*>(block->cell(idx).cell_ptr());
-                    auto result = (!block->cell(idx).is_null() && _operator(*cell_value, _value));
-                    flags[i] = flags[i] | (_opposite ? !result : result);
-                }
-            }
-        } else {
-            for (uint16_t i = 0; i < size; ++i) {
-                if (flags[i]) {
-                    continue;
-                }
-                uint16_t idx = sel[i];
-                if constexpr (Type == TYPE_DATE) {
-                    T tmp_uint32_value = 0;
-                    memcpy((char*)(&tmp_uint32_value), block->cell(idx).cell_ptr(),
-                           sizeof(uint24_t));
-                    auto result = _operator(tmp_uint32_value, _value);
-                    flags[i] = flags[i] | (_opposite ? !result : result);
-                } else {
-                    const T* cell_value = reinterpret_cast<const T*>(block->cell(idx).cell_ptr());
-                    auto result = _operator(*cell_value, _value);
-                    flags[i] = flags[i] | (_opposite ? !result : result);
-                }
-            }
-        }
-    }
-
-    void evaluate_and(ColumnBlock* block, uint16_t* sel, uint16_t size,
-                      bool* flags) const override {
-        if (block->is_nullable()) {
-            for (uint16_t i = 0; i < size; ++i) {
-                if (!flags[i]) {
-                    continue;
-                }
-                uint16_t idx = sel[i];
-                if constexpr (Type == TYPE_DATE) {
-                    T tmp_uint32_value = 0;
-                    memcpy((char*)(&tmp_uint32_value), block->cell(idx).cell_ptr(),
-                           sizeof(uint24_t));
-                    auto result =
-                            (!block->cell(idx).is_null() && _operator(tmp_uint32_value, _value));
-                    flags[i] = flags[i] & (_opposite ? !result : result);
-                } else {
-                    const T* cell_value = reinterpret_cast<const T*>(block->cell(idx).cell_ptr());
-                    auto result = (!block->cell(idx).is_null() && _operator(*cell_value, _value));
-                    flags[i] = flags[i] & (_opposite ? !result : result);
-                }
-            }
-        } else {
-            for (uint16_t i = 0; i < size; ++i) {
-                if (flags[i]) {
-                    continue;
-                }
-                uint16_t idx = sel[i];
-                if constexpr (Type == TYPE_DATE) {
-                    T tmp_uint32_value = 0;
-                    memcpy((char*)(&tmp_uint32_value), block->cell(idx).cell_ptr(),
-                           sizeof(uint24_t));
-                    auto result = _operator(tmp_uint32_value, _value);
-                    flags[i] = flags[i] & (_opposite ? !result : result);
-                } else {
-                    const T* cell_value = reinterpret_cast<const T*>(block->cell(idx).cell_ptr());
-                    auto result = _operator(*cell_value, _value);
-                    flags[i] = flags[i] & (_opposite ? !result : result);
-                }
-            }
-        }
-    }
 
     Status evaluate(BitmapIndexIterator* iterator, uint32_t num_rows,
                     roaring::Roaring* bitmap) const override {
@@ -172,28 +57,75 @@ public:
         }
 
         roaring::Roaring roaring;
-        bool exact_match;
-        Status status = iterator->seek_dictionary(&_value, &exact_match);
+        bool exact_match = false;
+
+        auto&& value = PrimitiveTypeConvertor<Type>::to_storage_field_type(_value);
+        Status status = iterator->seek_dictionary(&value, &exact_match);
         rowid_t seeked_ordinal = iterator->current_ordinal();
 
         return _bitmap_compare(status, exact_match, ordinal_limit, seeked_ordinal, iterator,
                                bitmap);
     }
 
-    uint16_t evaluate(const vectorized::IColumn& column, uint16_t* sel,
-                      uint16_t size) const override {
-        if (column.is_nullable()) {
-            auto* nullable_column_ptr =
-                    vectorized::check_and_get_column<vectorized::ColumnNullable>(column);
-            auto& nested_column = nullable_column_ptr->get_nested_column();
-            auto& null_map = reinterpret_cast<const vectorized::ColumnUInt8&>(
-                                     nullable_column_ptr->get_null_map_column())
-                                     .get_data();
-
-            return _base_evaluate<true>(&nested_column, null_map.data(), sel, size);
-        } else {
-            return _base_evaluate<false>(&column, nullptr, sel, size);
+    Status evaluate(const vectorized::IndexFieldNameAndTypePair& name_with_type,
+                    InvertedIndexIterator* iterator, uint32_t num_rows,
+                    roaring::Roaring* bitmap) const override {
+        if (iterator == nullptr) {
+            return Status::OK();
         }
+        std::string column_name = name_with_type.first;
+
+        InvertedIndexQueryType query_type = InvertedIndexQueryType::UNKNOWN_QUERY;
+        switch (PT) {
+        case PredicateType::EQ:
+            query_type = InvertedIndexQueryType::EQUAL_QUERY;
+            break;
+        case PredicateType::NE:
+            query_type = InvertedIndexQueryType::EQUAL_QUERY;
+            break;
+        case PredicateType::LT:
+            query_type = InvertedIndexQueryType::LESS_THAN_QUERY;
+            break;
+        case PredicateType::LE:
+            query_type = InvertedIndexQueryType::LESS_EQUAL_QUERY;
+            break;
+        case PredicateType::GT:
+            query_type = InvertedIndexQueryType::GREATER_THAN_QUERY;
+            break;
+        case PredicateType::GE:
+            query_type = InvertedIndexQueryType::GREATER_EQUAL_QUERY;
+            break;
+        default:
+            return Status::InvalidArgument("invalid comparison predicate type {}", PT);
+        }
+
+        std::shared_ptr<roaring::Roaring> roaring = std::make_shared<roaring::Roaring>();
+
+        std::unique_ptr<InvertedIndexQueryParamFactory> query_param = nullptr;
+        RETURN_IF_ERROR(
+                InvertedIndexQueryParamFactory::create_query_value<Type>(&_value, query_param));
+        RETURN_IF_ERROR(iterator->read_from_inverted_index(column_name, query_param->get_value(),
+                                                           query_type, num_rows, roaring));
+
+        // mask out null_bitmap, since NULL cmp VALUE will produce NULL
+        //  and be treated as false in WHERE
+        // keep it after query, since query will try to read null_bitmap and put it to cache
+        if (iterator->has_null()) {
+            InvertedIndexQueryCacheHandle null_bitmap_cache_handle;
+            RETURN_IF_ERROR(iterator->read_null_bitmap(&null_bitmap_cache_handle));
+            std::shared_ptr<roaring::Roaring> null_bitmap = null_bitmap_cache_handle.get_bitmap();
+            if (null_bitmap) {
+                *bitmap -= *null_bitmap;
+            }
+        }
+
+        if constexpr (PT == PredicateType::NE) {
+            *bitmap -= *roaring;
+        } else {
+            *bitmap &= *roaring;
+        }
+
+        return Status::OK();
     }
 
     void evaluate_and(const vectorized::IColumn& column, const uint16_t* sel, uint16_t size,
@@ -201,109 +133,98 @@ public:
         _evaluate_bit<true>(column, sel, size, flags);
     }
 
-#define COMPARE_TO_MIN_OR_MAX(ELE)                                                        \
-    if constexpr (Type == TYPE_DATE) {                                                    \
-        T tmp_uint32_value = 0;                                                           \
-        memcpy((char*)(&tmp_uint32_value), statistic.ELE->cell_ptr(), sizeof(uint24_t));  \
-        return _operator(tmp_uint32_value, _value);                                       \
-    } else {                                                                              \
-        return _operator(*reinterpret_cast<const T*>(statistic.ELE->cell_ptr()), _value); \
-    }
-
     bool evaluate_and(const std::pair<WrapperField*, WrapperField*>& statistic) const override {
         if (statistic.first->is_null()) {
             return true;
         }
+
+        T tmp_min_value = get_zone_map_value<Type, T>(statistic.first->cell_ptr());
+        T tmp_max_value = get_zone_map_value<Type, T>(statistic.second->cell_ptr());
+
         if constexpr (PT == PredicateType::EQ) {
-            if constexpr (Type == TYPE_DATE) {
-                T tmp_min_uint32_value = 0;
-                memcpy((char*)(&tmp_min_uint32_value), statistic.first->cell_ptr(),
-                       sizeof(uint24_t));
-                T tmp_max_uint32_value = 0;
-                memcpy((char*)(&tmp_max_uint32_value), statistic.second->cell_ptr(),
-                       sizeof(uint24_t));
-                return _operator(tmp_min_uint32_value <= _value && tmp_max_uint32_value >= _value,
-                                 true);
-            } else {
-                return _operator(
-                        *reinterpret_cast<const T*>(statistic.first->cell_ptr()) <= _value &&
-                                *reinterpret_cast<const T*>(statistic.second->cell_ptr()) >= _value,
-                        true);
-            }
+            return _operator(tmp_min_value <= _value && tmp_max_value >= _value, true);
         } else if constexpr (PT == PredicateType::NE) {
-            if constexpr (Type == TYPE_DATE) {
-                T tmp_min_uint32_value = 0;
-                memcpy((char*)(&tmp_min_uint32_value), statistic.first->cell_ptr(),
-                       sizeof(uint24_t));
-                T tmp_max_uint32_value = 0;
-                memcpy((char*)(&tmp_max_uint32_value), statistic.second->cell_ptr(),
-                       sizeof(uint24_t));
-                return _operator(tmp_min_uint32_value == _value && tmp_max_uint32_value == _value,
-                                 true);
-            } else {
-                return _operator(
-                        *reinterpret_cast<const T*>(statistic.first->cell_ptr()) == _value &&
-                                *reinterpret_cast<const T*>(statistic.second->cell_ptr()) == _value,
-                        true);
-            }
+            return _operator(tmp_min_value == _value && tmp_max_value == _value, true);
         } else if constexpr (PT == PredicateType::LT || PT == PredicateType::LE) {
-            COMPARE_TO_MIN_OR_MAX(first)
+            return _operator(tmp_min_value, _value);
         } else {
             static_assert(PT == PredicateType::GT || PT == PredicateType::GE);
-            COMPARE_TO_MIN_OR_MAX(second)
+            return _operator(tmp_max_value, _value);
         }
+    }
+
+    bool is_always_true(const std::pair<WrapperField*, WrapperField*>& statistic) const override {
+        if (statistic.first->is_null() || statistic.second->is_null()) {
+            return false;
+        }
+
+        T tmp_min_value = get_zone_map_value<Type, T>(statistic.first->cell_ptr());
+        T tmp_max_value = get_zone_map_value<Type, T>(statistic.second->cell_ptr());
+
+        if constexpr (PT == PredicateType::LT) {
+            return _value > tmp_max_value;
+        } else if constexpr (PT == PredicateType::LE) {
+            return _value >= tmp_max_value;
+        } else if constexpr (PT == PredicateType::GT) {
+            return _value < tmp_min_value;
+        } else if constexpr (PT == PredicateType::GE) {
+            return _value <= tmp_min_value;
+        }
+
+        return false;
     }
 
     bool evaluate_del(const std::pair<WrapperField*, WrapperField*>& statistic) const override {
         if (statistic.first->is_null() || statistic.second->is_null()) {
             return false;
         }
+
+        T tmp_min_value = get_zone_map_value<Type, T>(statistic.first->cell_ptr());
+        T tmp_max_value = get_zone_map_value<Type, T>(statistic.second->cell_ptr());
+
         if constexpr (PT == PredicateType::EQ) {
-            if constexpr (Type == TYPE_DATE) {
-                T tmp_min_uint32_value = 0;
-                memcpy((char*)(&tmp_min_uint32_value), statistic.first->cell_ptr(),
-                       sizeof(uint24_t));
-                T tmp_max_uint32_value = 0;
-                memcpy((char*)(&tmp_max_uint32_value), statistic.second->cell_ptr(),
-                       sizeof(uint24_t));
-                return _operator(tmp_min_uint32_value == _value && tmp_max_uint32_value == _value,
-                                 true);
-            } else {
-                return *reinterpret_cast<const T*>(statistic.first->cell_ptr()) == _value &&
-                       *reinterpret_cast<const T*>(statistic.second->cell_ptr()) == _value;
-            }
+            return tmp_min_value == _value && tmp_max_value == _value;
         } else if constexpr (PT == PredicateType::NE) {
-            if constexpr (Type == TYPE_DATE) {
-                T tmp_min_uint32_value = 0;
-                memcpy((char*)(&tmp_min_uint32_value), statistic.first->cell_ptr(),
-                       sizeof(uint24_t));
-                T tmp_max_uint32_value = 0;
-                memcpy((char*)(&tmp_max_uint32_value), statistic.second->cell_ptr(),
-                       sizeof(uint24_t));
-                return tmp_min_uint32_value > _value || tmp_max_uint32_value < _value;
-            } else {
-                return *reinterpret_cast<const T*>(statistic.first->cell_ptr()) > _value ||
-                       *reinterpret_cast<const T*>(statistic.second->cell_ptr()) < _value;
-            }
+            return tmp_min_value > _value || tmp_max_value < _value;
         } else if constexpr (PT == PredicateType::LT || PT == PredicateType::LE) {
-            COMPARE_TO_MIN_OR_MAX(second)
+            return _operator(tmp_max_value, _value);
         } else {
             static_assert(PT == PredicateType::GT || PT == PredicateType::GE);
-            COMPARE_TO_MIN_OR_MAX(first)
+            return _operator(tmp_min_value, _value);
         }
     }
-#undef COMPARE_TO_MIN_OR_MAX
 
     bool evaluate_and(const segment_v2::BloomFilter* bf) const override {
         if constexpr (PT == PredicateType::EQ) {
-            if constexpr (std::is_same_v<T, StringValue>) {
-                return bf->test_bytes(_value.ptr, _value.len);
-            } else if constexpr (Type == TYPE_DATE) {
-                return bf->test_bytes(const_cast<char*>(reinterpret_cast<const char*>(&_value)),
-                                      sizeof(uint24_t));
+            // EQ predicate can not use ngram bf, just return true to accept
+            if (bf->is_ngram_bf()) {
+                return true;
+            }
+            if constexpr (std::is_same_v<T, StringRef>) {
+                return bf->test_bytes(_value.data, _value.size);
             } else {
-                return bf->test_bytes(const_cast<char*>(reinterpret_cast<const char*>(&_value)),
-                                      sizeof(_value));
+                // DecimalV2 using decimal12_t in bloom filter, should convert value to decimal12_t
+                if constexpr (Type == PrimitiveType::TYPE_DECIMALV2) {
+                    decimal12_t decimal12_t_val(_value.int_value(), _value.frac_value());
+                    return bf->test_bytes(
+                            const_cast<char*>(reinterpret_cast<const char*>(&decimal12_t_val)),
+                            sizeof(decimal12_t));
+                    // Datev1 using uint24_t in bloom filter
+                } else if constexpr (Type == PrimitiveType::TYPE_DATE) {
+                    uint24_t date_value(_value.to_olap_date());
+                    return bf->test_bytes(
+                            const_cast<char*>(reinterpret_cast<const char*>(&date_value)),
+                            sizeof(uint24_t));
+                    // DatetimeV1 using int64_t in bloom filter
+                } else if constexpr (Type == PrimitiveType::TYPE_DATETIME) {
+                    int64_t datetime_value(_value.to_olap_datetime());
+                    return bf->test_bytes(
+                            const_cast<char*>(reinterpret_cast<const char*>(&datetime_value)),
+                            sizeof(int64_t));
+                } else {
+                    return bf->test_bytes(const_cast<char*>(reinterpret_cast<const char*>(&_value)),
+                                          sizeof(T));
+                }
             }
         } else {
             LOG(FATAL) << "Bloom filter is not supported by predicate type.";
@@ -311,7 +232,22 @@ public:
         }
     }
 
-    bool can_do_bloom_filter() const override { return PT == PredicateType::EQ; }
+    bool evaluate_and(const StringRef* dict_words, const size_t count) const override {
+        if constexpr (std::is_same_v<T, StringRef>) {
+            for (size_t i = 0; i != count; ++i) {
+                if (_operator(dict_words[i], _value) ^ _opposite) {
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        return true;
+    }
+
+    bool can_do_bloom_filter(bool ngram) const override {
+        return PT == PredicateType::EQ && !ngram;
+    }
 
     void evaluate_or(const vectorized::IColumn& column, const uint16_t* sel, uint16_t size,
                      bool* flags) const override {
@@ -321,54 +257,85 @@ public:
     template <bool is_and>
     __attribute__((flatten)) void _evaluate_vec_internal(const vectorized::IColumn& column,
                                                          uint16_t size, bool* flags) const {
-        if (column.is_nullable()) {
-            auto* nullable_column_ptr =
-                    vectorized::check_and_get_column<vectorized::ColumnNullable>(column);
-            auto& nested_column = nullable_column_ptr->get_nested_column();
-            auto& null_map = reinterpret_cast<const vectorized::ColumnUInt8&>(
-                                     nullable_column_ptr->get_null_map_column())
-                                     .get_data();
-
-            if (nested_column.is_column_dictionary()) {
-                if constexpr (std::is_same_v<T, StringValue>) {
-                    auto* dict_column_ptr =
-                            vectorized::check_and_get_column<vectorized::ColumnDictI32>(
-                                    nested_column);
-                    auto dict_code = _is_range() ? dict_column_ptr->find_code_by_bound(
-                                                           _value, _is_greater(), _is_eq())
-                                                 : dict_column_ptr->find_code(_value);
-                    auto* data_array = dict_column_ptr->get_data().data();
-
-                    _base_loop_vec<true, is_and>(size, flags, null_map.data(), data_array,
-                                                 dict_code);
-                } else {
-                    LOG(FATAL) << "column_dictionary must use StringValue predicate.";
+        uint16_t current_evaluated_rows = 0;
+        uint16_t current_passed_rows = 0;
+        if (_can_ignore()) {
+            if (is_and) {
+                for (uint16_t i = 0; i < size; i++) {
+                    current_evaluated_rows += flags[i];
                 }
             } else {
-                auto* data_array = reinterpret_cast<const vectorized::PredicateColumnType<Type>&>(
-                                           nested_column)
-                                           .get_data()
-                                           .data();
+                current_evaluated_rows += size;
+            }
+            _evaluated_rows += current_evaluated_rows;
+        }
+
+        if (column.is_nullable()) {
+            const auto* nullable_column_ptr =
+                    vectorized::check_and_get_column<vectorized::ColumnNullable>(column);
+            const auto& nested_column = nullable_column_ptr->get_nested_column();
+            const auto& null_map = assert_cast<const vectorized::ColumnUInt8&>(
+                                           nullable_column_ptr->get_null_map_column())
+                                           .get_data();
+
+            if (nested_column.is_column_dictionary()) {
+                if constexpr (std::is_same_v<T, StringRef>) {
+                    const auto* dict_column_ptr =
+                            vectorized::check_and_get_column<vectorized::ColumnDictI32>(
+                                    nested_column);
+
+                    auto dict_code = _find_code_from_dictionary_column(*dict_column_ptr);
+                    do {
+                        if constexpr (PT == PredicateType::EQ) {
+                            if (dict_code == -2) {
+                                memset(flags, 0, size);
+                                break;
+                            }
+                        }
+                        const auto* data_array = dict_column_ptr->get_data().data();
+
+                        _base_loop_vec<true, is_and>(size, flags, null_map.data(), data_array,
+                                                     dict_code);
+                    } while (false);
+                } else {
+                    LOG(FATAL) << "column_dictionary must use StringRef predicate.";
+                    __builtin_unreachable();
+                }
+            } else {
+                auto* data_array =
+                        vectorized::check_and_get_column<
+                                const vectorized::PredicateColumnType<PredicateEvaluateType<Type>>>(
+                                nested_column)
+                                ->get_data()
+                                .data();
 
                 _base_loop_vec<true, is_and>(size, flags, null_map.data(), data_array, _value);
             }
         } else {
             if (column.is_column_dictionary()) {
-                if constexpr (std::is_same_v<T, StringValue>) {
-                    auto* dict_column_ptr =
+                if constexpr (std::is_same_v<T, StringRef>) {
+                    const auto* dict_column_ptr =
                             vectorized::check_and_get_column<vectorized::ColumnDictI32>(column);
-                    auto dict_code = _is_range() ? dict_column_ptr->find_code_by_bound(
-                                                           _value, _is_greater(), _is_eq())
-                                                 : dict_column_ptr->find_code(_value);
-                    auto* data_array = dict_column_ptr->get_data().data();
+                    auto dict_code = _find_code_from_dictionary_column(*dict_column_ptr);
+                    do {
+                        if constexpr (PT == PredicateType::EQ) {
+                            if (dict_code == -2) {
+                                memset(flags, 0, size);
+                                break;
+                            }
+                        }
+                        const auto* data_array = dict_column_ptr->get_data().data();
 
-                    _base_loop_vec<false, is_and>(size, flags, nullptr, data_array, dict_code);
+                        _base_loop_vec<false, is_and>(size, flags, nullptr, data_array, dict_code);
+                    } while (false);
                 } else {
-                    LOG(FATAL) << "column_dictionary must use StringValue predicate.";
+                    LOG(FATAL) << "column_dictionary must use StringRef predicate.";
+                    __builtin_unreachable();
                 }
             } else {
                 auto* data_array =
-                        vectorized::check_and_get_column<vectorized::PredicateColumnType<Type>>(
+                        vectorized::check_and_get_column<
+                                vectorized::PredicateColumnType<PredicateEvaluateType<Type>>>(
                                 column)
                                 ->get_data()
                                 .data();
@@ -382,6 +349,15 @@ public:
                 flags[i] = !flags[i];
             }
         }
+
+        if (_can_ignore()) {
+            for (uint16_t i = 0; i < size; i++) {
+                current_passed_rows += flags[i];
+            }
+            _passed_rows += current_passed_rows;
+            do_judge_selectivity(current_evaluated_rows - current_passed_rows,
+                                 current_evaluated_rows);
+        }
     }
 
     void evaluate_vec(const vectorized::IColumn& column, uint16_t size,
@@ -394,7 +370,25 @@ public:
         _evaluate_vec_internal<true>(column, size, flags);
     }
 
+    double get_ignore_threshold() const override { return get_comparison_ignore_thredhold(); }
+
 private:
+    uint16_t _evaluate_inner(const vectorized::IColumn& column, uint16_t* sel,
+                             uint16_t size) const override {
+        if (column.is_nullable()) {
+            const auto* nullable_column_ptr =
+                    vectorized::check_and_get_column<vectorized::ColumnNullable>(column);
+            const auto& nested_column = nullable_column_ptr->get_nested_column();
+            const auto& null_map = assert_cast<const vectorized::ColumnUInt8&>(
+                                           nullable_column_ptr->get_null_map_column())
+                                           .get_data();
+
+            return _base_evaluate<true>(&nested_column, null_map.data(), sel, size);
+        } else {
+            return _base_evaluate<false>(&column, nullptr, sel, size);
+        }
+    }
+
     template <typename LeftT, typename RightT>
     bool _operator(const LeftT& lhs, const RightT& rhs) const {
         if constexpr (PT == PredicateType::EQ) {
@@ -423,7 +417,7 @@ private:
                            roaring::Roaring* bitmap) const {
         roaring::Roaring roaring;
 
-        if (status.is_not_found()) {
+        if (status.is<ErrorCode::ENTRY_NOT_FOUND>()) {
             if constexpr (PT == PredicateType::EQ || PT == PredicateType::GT ||
                           PT == PredicateType::GE) {
                 *bitmap &= roaring; // set bitmap to empty
@@ -468,12 +462,12 @@ private:
     void _evaluate_bit(const vectorized::IColumn& column, const uint16_t* sel, uint16_t size,
                        bool* flags) const {
         if (column.is_nullable()) {
-            auto* nullable_column_ptr =
+            const auto* nullable_column_ptr =
                     vectorized::check_and_get_column<vectorized::ColumnNullable>(column);
-            auto& nested_column = nullable_column_ptr->get_nested_column();
-            auto& null_map = reinterpret_cast<const vectorized::ColumnUInt8&>(
-                                     nullable_column_ptr->get_null_map_column())
-                                     .get_data();
+            const auto& nested_column = nullable_column_ptr->get_nested_column();
+            const auto& null_map = assert_cast<const vectorized::ColumnUInt8&>(
+                                           nullable_column_ptr->get_null_map_column())
+                                           .get_data();
 
             _base_evaluate_bit<true, is_and>(&nested_column, null_map.data(), sel, size, flags);
         } else {
@@ -487,7 +481,7 @@ private:
                                                  const TArray* __restrict data_array,
                                                  const TValue& value) const {
         //uint8_t helps compiler to generate vectorized code
-        uint8_t* flags = reinterpret_cast<uint8_t*>(bflags);
+        auto* flags = reinterpret_cast<uint8_t*>(bflags);
         if constexpr (is_and) {
             for (uint16_t i = 0; i < size; i++) {
                 if constexpr (is_nullable) {
@@ -532,21 +526,21 @@ private:
     void _base_evaluate_bit(const vectorized::IColumn* column, const uint8_t* null_map,
                             const uint16_t* sel, uint16_t size, bool* flags) const {
         if (column->is_column_dictionary()) {
-            if constexpr (std::is_same_v<T, StringValue>) {
-                auto* dict_column_ptr =
+            if constexpr (std::is_same_v<T, StringRef>) {
+                const auto* dict_column_ptr =
                         vectorized::check_and_get_column<vectorized::ColumnDictI32>(column);
-                auto* data_array = dict_column_ptr->get_data().data();
-                auto dict_code = _is_range() ? dict_column_ptr->find_code_by_bound(
-                                                       _value, _operator(1, 0), _operator(1, 1))
-                                             : dict_column_ptr->find_code(_value);
+                const auto* data_array = dict_column_ptr->get_data().data();
+                auto dict_code = _find_code_from_dictionary_column(*dict_column_ptr);
                 _base_loop_bit<is_nullable, is_and>(sel, size, flags, null_map, data_array,
                                                     dict_code);
             } else {
-                LOG(FATAL) << "column_dictionary must use StringValue predicate.";
+                LOG(FATAL) << "column_dictionary must use StringRef predicate.";
+                __builtin_unreachable();
             }
         } else {
             auto* data_array =
-                    vectorized::check_and_get_column<vectorized::PredicateColumnType<Type>>(column)
+                    vectorized::check_and_get_column<
+                            vectorized::PredicateColumnType<PredicateEvaluateType<Type>>>(column)
                             ->get_data()
                             .data();
 
@@ -554,58 +548,90 @@ private:
         }
     }
 
-    template <bool is_nullable, typename TArray, typename TValue>
-    uint16_t _base_loop(uint16_t* sel, uint16_t size, const uint8_t* __restrict null_map,
-                        const TArray* __restrict data_array, const TValue& value) const {
-        uint16_t new_size = 0;
-        for (uint16_t i = 0; i < size; ++i) {
-            uint16_t idx = sel[i];
-            if constexpr (is_nullable) {
-                if (_opposite ^ (!null_map[idx] && _operator(data_array[idx], value))) {
-                    sel[new_size++] = idx;
-                }
-            } else {
-                if (_opposite ^ _operator(data_array[idx], value)) {
-                    sel[new_size++] = idx;
-                }
-            }
-        }
-        return new_size;
-    }
-
     template <bool is_nullable>
     uint16_t _base_evaluate(const vectorized::IColumn* column, const uint8_t* null_map,
                             uint16_t* sel, uint16_t size) const {
         if (column->is_column_dictionary()) {
-            if constexpr (std::is_same_v<T, StringValue>) {
-                auto* dict_column_ptr =
+            if constexpr (std::is_same_v<T, StringRef>) {
+                const auto* dict_column_ptr =
                         vectorized::check_and_get_column<vectorized::ColumnDictI32>(column);
-                auto* data_array = dict_column_ptr->get_data().data();
-                auto dict_code = _is_range() ? dict_column_ptr->find_code_by_bound(
-                                                       _value, _is_greater(), _is_eq())
-                                             : dict_column_ptr->find_code(_value);
+                const auto& pred_col = dict_column_ptr->get_data();
+                const auto* pred_col_data = pred_col.data();
+                auto dict_code = _find_code_from_dictionary_column(*dict_column_ptr);
 
-                return _base_loop<is_nullable>(sel, size, null_map, data_array, dict_code);
+                if constexpr (PT == PredicateType::EQ) {
+                    if (dict_code == -2) {
+                        return _opposite ? size : 0;
+                    }
+                }
+                uint16_t new_size = 0;
+#define EVALUATE_WITH_NULL_IMPL(IDX) \
+    _opposite ^ (!null_map[IDX] && _operator(pred_col_data[IDX], dict_code))
+#define EVALUATE_WITHOUT_NULL_IMPL(IDX) _opposite ^ _operator(pred_col_data[IDX], dict_code)
+                EVALUATE_BY_SELECTOR(EVALUATE_WITH_NULL_IMPL, EVALUATE_WITHOUT_NULL_IMPL)
+#undef EVALUATE_WITH_NULL_IMPL
+#undef EVALUATE_WITHOUT_NULL_IMPL
+
+                return new_size;
             } else {
-                LOG(FATAL) << "column_dictionary must use StringValue predicate.";
+                LOG(FATAL) << "column_dictionary must use StringRef predicate.";
                 return 0;
             }
         } else {
-            auto* data_array =
-                    vectorized::check_and_get_column<vectorized::PredicateColumnType<EvalType>>(
-                            column)
-                            ->get_data()
-                            .data();
-
-            return _base_loop<is_nullable>(sel, size, null_map, data_array, _value);
+            auto& pred_col =
+                    vectorized::check_and_get_column<
+                            vectorized::PredicateColumnType<PredicateEvaluateType<Type>>>(column)
+                            ->get_data();
+            auto pred_col_data = pred_col.data();
+            uint16_t new_size = 0;
+#define EVALUATE_WITH_NULL_IMPL(IDX) \
+    _opposite ^ (!null_map[IDX] && _operator(pred_col_data[IDX], _value))
+#define EVALUATE_WITHOUT_NULL_IMPL(IDX) _opposite ^ _operator(pred_col_data[IDX], _value)
+            EVALUATE_BY_SELECTOR(EVALUATE_WITH_NULL_IMPL, EVALUATE_WITHOUT_NULL_IMPL)
+#undef EVALUATE_WITH_NULL_IMPL
+#undef EVALUATE_WITHOUT_NULL_IMPL
+            return new_size;
         }
     }
 
-    T _value;
-    static constexpr PrimitiveType EvalType = (Type == TYPE_CHAR ? TYPE_STRING : Type);
-};
+    __attribute__((flatten)) int32_t _find_code_from_dictionary_column(
+            const vectorized::ColumnDictI32& column) const {
+        int32_t code = 0;
+        if (_segment_id_to_cached_code.if_contains(
+                    column.get_rowset_segment_id(),
+                    [&code](const auto& pair) { code = pair.second; })) {
+            return code;
+        }
+        code = _is_range() ? column.find_code_by_bound(_value, _is_greater(), _is_eq())
+                           : column.find_code(_value);
+        // Sometimes the dict is not initialized when run comparison predicate here, for example,
+        // the full page is null, then the reader will skip read, so that the dictionary is not
+        // inited. The cached code is wrong during this case, because the following page maybe not
+        // null, and the dict should have items in the future.
+        //
+        // Cached code may have problems, so that add a config here, if not opened, then
+        // we will return the code and not cache it.
+        if (!column.is_dict_empty() && config::enable_low_cardinality_cache_code) {
+            _segment_id_to_cached_code.emplace(std::pair {column.get_rowset_segment_id(), code});
+        }
 
-template <PrimitiveType Type, PredicateType PT>
-constexpr PrimitiveType ComparisonPredicateBase<Type, PT>::EvalType;
+        return code;
+    }
+
+    std::string _debug_string() const override {
+        std::string info =
+                "ComparisonPredicateBase(" + type_to_string(Type) + ", " + type_to_string(PT) + ")";
+        return info;
+    }
+
+    mutable phmap::parallel_flat_hash_map<
+            std::pair<RowsetId, uint32_t>, int32_t,
+            phmap::priv::hash_default_hash<std::pair<RowsetId, uint32_t>>,
+            phmap::priv::hash_default_eq<std::pair<RowsetId, uint32_t>>,
+            std::allocator<std::pair<const std::pair<RowsetId, uint32_t>, int32_t>>, 4,
+            std::shared_mutex>
+            _segment_id_to_cached_code;
+    T _value;
+};
 
 } //namespace doris

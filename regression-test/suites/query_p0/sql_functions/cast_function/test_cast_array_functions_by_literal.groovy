@@ -17,7 +17,6 @@
 
 suite("test_cast_array_functions_by_literal") {
     // array functions only supported in vectorized engine
-    sql """ set enable_vectorized_engine = true """
     test {
         // char to int is ok
         sql "select cast(cast('1' as char) as int)"
@@ -39,78 +38,11 @@ suite("test_cast_array_functions_by_literal") {
     qt_sql5 "select cast('[]' as array<int>)"
     qt_sql6 """select cast('["a", "b", "c"]' as array<int>)"""
     qt_sql7 """select cast('["a", "b", "c"]' as array<string>)"""
+    // empty string is invalid array, return NULL
+    qt_sql8 """select cast('' as array<string>)"""
 
-    test {
-        sql "select cast(NULL as array<int>)"
-        // check exception message contains
-        exception "errCode = 2,"
-    }
+    qt_sql9 """select cast(NULL as array<int>)"""
 
-    test {
-        sql "select cast(1 as array<int>)"
-        // check exception message contains
-        exception "errCode = 2,"
-    }
-
-    test {
-        sql "select cast(999.999 as array<double>)"
-        // check exception message contains
-        exception "errCode = 2,"
-    }
-
-    test {
-        sql "select cast(cast(999.999 as double) as array<double>)"
-        // check exception message contains
-        exception "errCode = 2,"
-    }
-
-    test {
-        sql "select cast(cast(999.999 as decimal) as array<decimal>)"
-        // check exception message contains
-        exception "errCode = 2,"
-    }
-    //  ========== cast array to scalar ===========
-
-    test {
-        sql "select cast(['x'] as char)"
-        // check exception message contains
-        exception "errCode = 2,"
-    }
-
-    test {
-        sql "select cast(['x'] as varchar)"
-        // check exception message contains
-        exception "errCode = 2,"
-    }
-
-    test {
-        sql "select cast(['x'] as string)"
-        // check exception message contains
-        exception "errCode = 2,"
-    }
-
-    test {
-        sql "select cast([0] as int)"
-        // check exception message contains
-        exception "errCode = 2,"
-    }
-
-    test {
-        sql "select cast([999.999] as double)"
-        // check exception message contains
-        exception "errCode = 2,"
-    }
-
-    test {
-        sql "select cast([999.999] as decimal)"
-        // check exception message contains
-        exception "errCode = 2,"
-    }
-
-    // Not Vectorized Engine
-    sql """ set enable_vectorized_engine = false """
-
-    //  ========== cast scalar to array ===========
     test {
         sql "select cast(1 as array<int>)"
         // check exception message contains

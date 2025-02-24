@@ -28,7 +28,7 @@ import org.apache.doris.qe.ConnectContext;
 import org.apache.doris.qe.ShowResultSetMetaData;
 
 // SHOW DATABASE ID
-public class ShowDbIdStmt extends ShowStmt {
+public class ShowDbIdStmt extends ShowStmt implements NotFallbackInParser {
     private long dbId;
 
     public ShowDbIdStmt(long dbId) {
@@ -42,7 +42,7 @@ public class ShowDbIdStmt extends ShowStmt {
     @Override
     public void analyze(Analyzer analyzer) throws AnalysisException {
         // check access first
-        if (!Env.getCurrentEnv().getAuth().checkGlobalPriv(ConnectContext.get(), PrivPredicate.ADMIN)) {
+        if (!Env.getCurrentEnv().getAccessManager().checkGlobalPriv(ConnectContext.get(), PrivPredicate.ADMIN)) {
             ErrorReport.reportAnalysisException(ErrorCode.ERR_SPECIFIC_ACCESS_DENIED_ERROR, "SHOW DATABASE");
         }
     }

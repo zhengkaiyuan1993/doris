@@ -6,23 +6,24 @@
 #pragma once
 
 #include <stddef.h>
-#include <stdlib.h>
-#include <string.h>
 #include <time.h>
-
+#include <stdint.h>
 #include <functional>
-using std::binary_function;
+
 using std::less;
 #include <limits>
+
 using std::numeric_limits;
 #include <string>
+
 using std::string;
 #include <vector>
+
 using std::vector;
 
-#include "gutil/int128.h"
 #include "gutil/integral_types.h"
-#include "gutil/macros.h"
+// IWYU pragma: no_include <butil/macros.h>
+#include "gutil/macros.h" // IWYU pragma: keep
 #include "gutil/port.h"
 #include "gutil/stringprintf.h"
 
@@ -31,10 +32,7 @@ using std::vector;
  * @{ */
 
 // Convert a fingerprint to 16 hex digits.
-string FpToString(Fprint fp);
-
-// Formats a uint128 as a 32-digit hex string.
-string Uint128ToHexString(uint128 ui128);
+string Uint64ToString(uint64 fp);
 
 // Convert strings to numeric values, with strict error checking.
 // Leading and trailing spaces are allowed.
@@ -329,25 +327,25 @@ bool AutoDigitLessThan(const char* a, int alen, const char* b, int blen);
 
 bool StrictAutoDigitLessThan(const char* a, int alen, const char* b, int blen);
 
-struct autodigit_less : public binary_function<const string&, const string&, bool> {
+struct autodigit_less {
     bool operator()(const string& a, const string& b) const {
         return AutoDigitLessThan(a.data(), a.size(), b.data(), b.size());
     }
 };
 
-struct autodigit_greater : public binary_function<const string&, const string&, bool> {
+struct autodigit_greater {
     bool operator()(const string& a, const string& b) const {
         return AutoDigitLessThan(b.data(), b.size(), a.data(), a.size());
     }
 };
 
-struct strict_autodigit_less : public binary_function<const string&, const string&, bool> {
+struct strict_autodigit_less {
     bool operator()(const string& a, const string& b) const {
         return StrictAutoDigitLessThan(a.data(), a.size(), b.data(), b.size());
     }
 };
 
-struct strict_autodigit_greater : public binary_function<const string&, const string&, bool> {
+struct strict_autodigit_greater {
     bool operator()(const string& a, const string& b) const {
         return StrictAutoDigitLessThan(b.data(), b.size(), a.data(), a.size());
     }
@@ -514,9 +512,9 @@ string AccurateItoaKMGT(int64 i);
 //    '\0'-terminated, which is more efficient.
 // ----------------------------------------------------------------------
 struct DoubleRangeOptions {
-    const char* separators;
+    const char* separators = nullptr;
     bool require_separator;
-    const char* acceptable_terminators;
+    const char* acceptable_terminators = nullptr;
     bool null_terminator_ok;
     bool allow_unbounded_markers;
     uint32 num_required_bounds;

@@ -30,6 +30,7 @@ import org.apache.doris.thrift.TExprOpcode;
 
 import com.google.common.base.Preconditions;
 import com.google.common.collect.Lists;
+import com.google.gson.annotations.SerializedName;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 
@@ -41,7 +42,8 @@ import java.util.Objects;
  */
 public class CompoundPredicate extends Predicate {
     private static final Logger LOG = LogManager.getLogger(CompoundPredicate.class);
-    private final Operator op;
+    @SerializedName("op")
+    private Operator op;
 
     public static void initBuiltins(FunctionSet functionSet) {
         functionSet.addBuiltinBothScalaAndVectorized(ScalarFunction.createBuiltinOperator(
@@ -50,6 +52,10 @@ public class CompoundPredicate extends Predicate {
                 Operator.OR.toString(), Lists.newArrayList(Type.BOOLEAN, Type.BOOLEAN), Type.BOOLEAN));
         functionSet.addBuiltinBothScalaAndVectorized(ScalarFunction.createBuiltinOperator(
                 Operator.NOT.toString(), Lists.newArrayList(Type.BOOLEAN), Type.BOOLEAN));
+    }
+
+    private CompoundPredicate() {
+        // use for serde only
     }
 
     public CompoundPredicate(Operator op, Expr e1, Expr e2) {
@@ -61,11 +67,13 @@ public class CompoundPredicate extends Predicate {
         if (e2 != null) {
             children.add(e2);
         }
+        printSqlInParens = true;
     }
 
     protected CompoundPredicate(CompoundPredicate other) {
         super(other);
         op = other.op;
+        printSqlInParens = true;
     }
 
     @Override
@@ -105,11 +113,6 @@ public class CompoundPredicate extends Predicate {
     protected void toThrift(TExprNode msg) {
         msg.node_type = TExprNodeType.COMPOUND_PRED;
         msg.setOpcode(op.toThrift());
-    }
-
-    @Override
-    public boolean isVectorized() {
-        return false;
     }
 
     @Override
@@ -213,9 +216,30 @@ public class CompoundPredicate extends Predicate {
         return conjunctivePred;
     }
 
+    /**
+     * Creates a disjunctive predicate from a list of exprs,
+     * reserve the expr order
+     */
+    public static Expr createDisjunctivePredicate(List<Expr> disjunctions) {
+        Expr result = null;
+        for (Expr expr : disjunctions) {
+            if (result == null) {
+                result = expr;
+                continue;
+            }
+            result = new CompoundPredicate(CompoundPredicate.Operator.OR, result, expr);
+        }
+        return result;
+    }
+
+    public static boolean isOr(Expr expr) {
+        return expr instanceof CompoundPredicate
+                && ((CompoundPredicate) expr).getOp() == Operator.OR;
+    }
+
     @Override
-    public Expr getResultValue() throws AnalysisException {
-        recursiveResetChildrenResult();
+    public Expr getResultValue(boolean forPushDownPredicatesToView) throws AnalysisException {
+        recursiveResetChildrenResult(forPushDownPredicatesToView);
         boolean compoundResult = false;
         if (op == Operator.NOT) {
             final Expr childValue = getChild(0);
@@ -258,7 +282,37 @@ public class CompoundPredicate extends Predicate {
     }
 
     @Override
-    public void finalizeImplForNereids() throws AnalysisException {
+    public String toString() {
+        return toSqlImpl();
+    }
 
+    @Override
+    public boolean containsSubPredicate(Expr subExpr) throws AnalysisException {
+        if (op.equals(Operator.AND)) {
+            for (Expr child : children) {
+                if (child.containsSubPredicate(subExpr)) {
+                    return true;
+                }
+            }
+        }
+        return super.containsSubPredicate(subExpr);
+    }
+
+    @Override
+    public Expr replaceSubPredicate(Expr subExpr) {
+        if (toSqlWithoutTbl().equals(subExpr.toSqlWithoutTbl())) {
+            return null;
+        }
+        if (op.equals(Operator.AND)) {
+            Expr lhs = children.get(0);
+            Expr rhs = children.get(1);
+            if (lhs.replaceSubPredicate(subExpr) == null) {
+                return rhs;
+            }
+            if (rhs.replaceSubPredicate(subExpr) == null) {
+                return lhs;
+            }
+        }
+        return this;
     }
 }

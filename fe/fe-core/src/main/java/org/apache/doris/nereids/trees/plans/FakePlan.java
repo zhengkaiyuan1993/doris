@@ -18,19 +18,27 @@
 package org.apache.doris.nereids.trees.plans;
 
 import org.apache.doris.nereids.memo.GroupExpression;
+import org.apache.doris.nereids.properties.DataTrait;
 import org.apache.doris.nereids.properties.LogicalProperties;
 import org.apache.doris.nereids.trees.expressions.Expression;
 import org.apache.doris.nereids.trees.expressions.Slot;
 import org.apache.doris.nereids.trees.plans.visitor.PlanVisitor;
+import org.apache.doris.nereids.util.MutableState;
+import org.apache.doris.nereids.util.MutableState.MultiMutableState;
+
+import com.google.common.collect.ImmutableList;
+import com.google.common.collect.ImmutableSet;
 
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
+import java.util.Set;
 
 /**
  * Used for unit test only.
  */
-public class FakePlan implements Plan {
+public class FakePlan implements Plan, BlockFuncDepsPropagation {
+    private MutableState mutableState = new MultiMutableState();
 
     @Override
     public List<Plan> children() {
@@ -74,7 +82,7 @@ public class FakePlan implements Plan {
 
     @Override
     public LogicalProperties getLogicalProperties() {
-        return new LogicalProperties(ArrayList::new);
+        return new LogicalProperties(ImmutableList::of, () -> DataTrait.EMPTY_TRAIT);
     }
 
     @Override
@@ -84,7 +92,12 @@ public class FakePlan implements Plan {
 
     @Override
     public List<Slot> getOutput() {
-        return new ArrayList<>();
+        return ImmutableList.of();
+    }
+
+    @Override
+    public Set<Slot> getOutputSet() {
+        return ImmutableSet.of();
     }
 
     @Override
@@ -98,7 +111,18 @@ public class FakePlan implements Plan {
     }
 
     @Override
-    public Plan withLogicalProperties(Optional<LogicalProperties> logicalProperties) {
+    public Plan withGroupExprLogicalPropChildren(Optional<GroupExpression> groupExpression,
+            Optional<LogicalProperties> logicalProperties, List<Plan> children) {
         return this;
+    }
+
+    @Override
+    public <T> Optional<T> getMutableState(String key) {
+        return (Optional<T>) Optional.ofNullable(mutableState.get(key));
+    }
+
+    @Override
+    public void setMutableState(String key, Object mutableState) {
+        this.mutableState = this.mutableState.set(key, mutableState);
     }
 }

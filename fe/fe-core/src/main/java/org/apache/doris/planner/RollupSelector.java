@@ -88,7 +88,9 @@ public final class RollupSelector {
             for (Long partitionId : partitionIds) {
                 rowCount += table.getPartition(partitionId).getIndex(indexId).getRowCount();
             }
-            LOG.debug("rowCount={} for table={}", rowCount, indexId);
+            if (LOG.isDebugEnabled()) {
+                LOG.debug("rowCount={} for table={}", rowCount, indexId);
+            }
             if (rowCount < minRowCount) {
                 minRowCount = rowCount;
                 selectedIndexId = indexId;
@@ -114,8 +116,8 @@ public final class RollupSelector {
         return selectedIndexId;
     }
 
-    private List<Long> selectBestPrefixIndexRollup(List<Expr> conjuncts, boolean isPreAggregation) {
-
+    private List<Long> selectBestPrefixIndexRollup(List<Expr> conjuncts, boolean isPreAggregation)
+            throws UserException {
         final List<String> outputColumns = Lists.newArrayList();
         for (SlotDescriptor slot : tupleDesc.getMaterializedSlots()) {
             Column col = slot.getColumn();
@@ -123,7 +125,9 @@ public final class RollupSelector {
         }
 
         final List<MaterializedIndex> rollups = table.getVisibleIndex();
-        LOG.debug("num of rollup(base included): {}, pre aggr: {}", rollups.size(), isPreAggregation);
+        if (LOG.isDebugEnabled()) {
+            LOG.debug("num of rollup(base included): {}, pre aggr: {}", rollups.size(), isPreAggregation);
+        }
 
         // 1. find all rollup indexes which contains all tuple columns
         final List<MaterializedIndex> rollupsContainsOutput = Lists.newArrayList();
@@ -131,31 +135,38 @@ public final class RollupSelector {
         for (MaterializedIndex rollup : rollups) {
             final Set<String> rollupColumns = Sets.newHashSet();
             table.getSchemaByIndexId(rollup.getId(), true)
-                    .stream().forEach(column -> rollupColumns.add(column.getName()));
+                    .forEach(column -> rollupColumns.add(column.getName()));
 
             if (rollupColumns.containsAll(outputColumns)) {
                 // If preAggregation is off, so that we only can use base table
                 // or those rollup tables which key columns is the same with base table
                 // (often in different order)
                 if (isPreAggregation) {
-                    LOG.debug("preAggregation is on. add index {} which contains all output columns",
-                            rollup.getId());
+                    if (LOG.isDebugEnabled()) {
+                        LOG.debug("preAggregation is on. add index {} which contains all output columns",
+                                rollup.getId());
+                    }
                     rollupsContainsOutput.add(rollup);
                 } else if (table.getKeyColumnsByIndexId(rollup.getId()).size() == baseTableColumns.size()) {
-                    LOG.debug("preAggregation is off, but index {} have same key columns with base index.",
-                            rollup.getId());
+                    if (LOG.isDebugEnabled()) {
+                        LOG.debug("preAggregation is off, but index {} have same key columns with base index.",
+                                rollup.getId());
+                    }
                     rollupsContainsOutput.add(rollup);
                 }
             } else {
-                LOG.debug("exclude index {} because it does not contain all output columns", rollup.getId());
+                if (LOG.isDebugEnabled()) {
+                    LOG.debug("exclude index {} because it does not contain all output columns", rollup.getId());
+                }
             }
         }
 
-        Preconditions.checkArgument(rollupsContainsOutput.size() > 0,
-                "Can't find candicate rollup contains all output columns.");
+        if (rollupsContainsOutput.size() == 0) {
+            throw new UserException("Can't find candicate rollup contains all output columns.");
+        }
 
-
-        // 2. find all rollups which match the prefix most based on predicates column from containTupleIndices.
+        // 2. find all rollups which match the prefix most based on predicates column
+        // from containTupleIndices.
         final Set<String> equivalenceColumns = Sets.newHashSet();
         final Set<String> unequivalenceColumns = Sets.newHashSet();
         collectColumns(conjuncts, equivalenceColumns, unequivalenceColumns);
@@ -164,7 +175,7 @@ public final class RollupSelector {
                          equivalenceColumns, unequivalenceColumns);
 
         if (rollupsMatchingBestPrefixIndex.isEmpty()) {
-            rollupsContainsOutput.stream().forEach(n -> rollupsMatchingBestPrefixIndex.add(n.getId()));
+            rollupsContainsOutput.forEach(n -> rollupsMatchingBestPrefixIndex.add(n.getId()));
         }
 
         // 3. sorted the final candidate indexes by index id
@@ -202,10 +213,16 @@ public final class RollupSelector {
             }
 
             if (prefixMatchCount == maxPrefixMatchCount) {
-                LOG.debug("s3: find a equal prefix match index {}. match count: {}", index.getId(), prefixMatchCount);
+                if (LOG.isDebugEnabled()) {
+                    LOG.debug("s3: find a equal prefix match index {}. match count: {}",
+                            index.getId(), prefixMatchCount);
+                }
                 rollupsMatchingBestPrefixIndex.add(index.getId());
             } else if (prefixMatchCount > maxPrefixMatchCount) {
-                LOG.debug("s3: find a better prefix match index {}. match count: {}", index.getId(), prefixMatchCount);
+                if (LOG.isDebugEnabled()) {
+                    LOG.debug("s3: find a better prefix match index {}. match count: {}",
+                            index.getId(), prefixMatchCount);
+                }
                 maxPrefixMatchCount = prefixMatchCount;
                 rollupsMatchingBestPrefixIndex.clear();
                 rollupsMatchingBestPrefixIndex.add(index.getId());

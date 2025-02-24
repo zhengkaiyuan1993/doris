@@ -40,7 +40,7 @@ import com.google.common.base.Strings;
  * for example:
  *     CREATE ENCRYPTKEY test.key1 AS "beijing";
  */
-public class CreateEncryptKeyStmt extends DdlStmt {
+public class CreateEncryptKeyStmt extends DdlStmt implements NotFallbackInParser {
     private final boolean ifNotExists;
     private final EncryptKeyName encryptKeyName;
     private final String keyString;
@@ -73,7 +73,7 @@ public class CreateEncryptKeyStmt extends DdlStmt {
         super.analyze(analyzer);
 
         // check operation privilege
-        if (!Env.getCurrentEnv().getAuth().checkGlobalPriv(ConnectContext.get(), PrivPredicate.ADMIN)) {
+        if (!Env.getCurrentEnv().getAccessManager().checkGlobalPriv(ConnectContext.get(), PrivPredicate.ADMIN)) {
             ErrorReport.reportAnalysisException(ErrorCode.ERR_SPECIFIC_ACCESS_DENIED_ERROR, "ADMIN");
         }
 
@@ -90,5 +90,10 @@ public class CreateEncryptKeyStmt extends DdlStmt {
         stringBuilder.append("CREATE ENCRYPTKEY ")
                 .append(encryptKeyName.getKeyName()).append(" AS \"").append(keyString).append("\"");
         return stringBuilder.toString();
+    }
+
+    @Override
+    public StmtType stmtType() {
+        return StmtType.CREATE;
     }
 }

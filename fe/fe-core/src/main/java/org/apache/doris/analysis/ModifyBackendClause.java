@@ -21,16 +21,20 @@ import org.apache.doris.common.AnalysisException;
 import org.apache.doris.common.Config;
 import org.apache.doris.common.util.PropertyAnalyzer;
 import org.apache.doris.resource.Tag;
+import org.apache.doris.system.SystemInfoService.HostInfo;
 
+import com.google.common.collect.ImmutableList;
 import com.google.common.collect.Maps;
+import lombok.Getter;
 import org.apache.commons.lang3.StringUtils;
 
 import java.util.List;
 import java.util.Map;
 
 public class ModifyBackendClause extends BackendClause {
-    protected Map<String, String> properties = Maps.newHashMap();
+    protected Map<String, String> properties;
     protected Map<String, String> analyzedProperties = Maps.newHashMap();
+    @Getter
     private Map<String, String> tagMap = null;
     private Boolean isQueryDisabled = null;
     private Boolean isLoadDisabled = null;
@@ -38,6 +42,20 @@ public class ModifyBackendClause extends BackendClause {
     public ModifyBackendClause(List<String> hostPorts, Map<String, String> properties) {
         super(hostPorts);
         this.properties = properties;
+    }
+
+    public ModifyBackendClause(List<String> ids, List<HostInfo> hostPorts,
+            Map<String, String> properties, Map<String, String> tagMap,
+            Map<String, String> analyzedProperties,
+            Boolean isLoadDisabled, Boolean isQueryDisabled) {
+        super(ImmutableList.of());
+        this.ids = ids;
+        this.hostInfos = hostPorts;
+        this.properties = properties;
+        this.tagMap = tagMap;
+        this.analyzedProperties = analyzedProperties;
+        this.isLoadDisabled = isLoadDisabled;
+        this.isQueryDisabled = isQueryDisabled;
     }
 
     @Override
@@ -74,10 +92,6 @@ public class ModifyBackendClause extends BackendClause {
         }
     }
 
-    public Map<String, String> getTagMap() {
-        return tagMap;
-    }
-
     public Boolean isQueryDisabled() {
         return isQueryDisabled;
     }
@@ -90,9 +104,9 @@ public class ModifyBackendClause extends BackendClause {
     public String toSql() {
         StringBuilder sb = new StringBuilder();
         sb.append("MODIFY BACKEND ");
-        for (int i = 0; i < hostPorts.size(); i++) {
-            sb.append("\"").append(hostPorts.get(i)).append("\"");
-            if (i != hostPorts.size() - 1) {
+        for (int i = 0; i < params.size(); i++) {
+            sb.append("\"").append(params.get(i)).append("\"");
+            if (i != params.size() - 1) {
                 sb.append(", ");
             }
         }

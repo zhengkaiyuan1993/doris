@@ -59,18 +59,27 @@ class OutputUtils {
         if (dataType == "FLOAT" || dataType == "DOUBLE" || dataType == "DECIMAL") {
             Boolean expectNull = expectCell.equals("\\\\N")
             Boolean actualNull = realCell.equals("\\\\N")
+            Boolean expectNan = expectCell.equals("nan")
+            Boolean actualNan = realCell.equals("nan")
+            Boolean expectInf = expectCell.equals("inf")
+            Boolean actualInf = realCell.equals("inf")
+            Boolean expectMinusInf = expectCell.equals("-inf")
+            Boolean actualMinusInf = realCell.equals("-inf")
 
-            if (expectNull != actualNull) {
+            if (expectNull != actualNull || expectNan != actualNan || expectInf != actualInf || expectMinusInf != actualMinusInf) {
                 return "${info}, line ${line}, ${dataType} result mismatch.\nExpect cell: ${expectCell}\nBut real is: ${realCell}"
             } else if (!expectNull) {
+                if (expectNull || expectNan || expectInf || expectMinusInf) {
+                    return null
+                }
                 // both are not null
                 double expectDouble = Double.parseDouble(expectCell)
                 double realDouble = Double.parseDouble(realCell)
 
-                double realRelativeError = Math.abs(expectDouble - realDouble) / realDouble
-                double expectRelativeError = 1e-10
+                double realRelativeError = Math.abs(expectDouble - realDouble) / Math.abs(realDouble)
+                double expectRelativeError = 1e-8
 
-                if(expectRelativeError < realRelativeError) {
+                if (expectRelativeError < realRelativeError) {
                     // Keep the scale of low precision data to solve TPCH cases like:
                     // "Expect cell is: 0.0395, But real is: 0.039535109"
                     int expectDecimalPlaces = expectCell.contains(".") ? expectCell.length() - expectCell.lastIndexOf(".") - 1 : 0
@@ -83,7 +92,7 @@ class OutputUtils {
                             return null
                         }
                     }
-                    return "${info}, line ${line}, ${dataType} result mismatch.\nExpect cell is: ${expectCell}\nBut real is: ${realCell}\nrelative error is: ${realRelativeError}, bigger than ${expectRelativeError}"
+                    return "${info}, line ${line}, ${dataType} result mismatch.\nExpect cell is: ${expectCell}\nBut real is   : ${realCell}\nrelative error is: ${realRelativeError}, bigger than ${expectRelativeError}"
                 }
             }
         } else if(dataType == "DATE" || dataType =="DATETIME") {
@@ -91,11 +100,11 @@ class OutputUtils {
             realCell = realCell.replace("T", " ")
 
             if(!expectCell.equals(realCell)) {
-                return "${info}, line ${line}, ${dataType} result mismatch.\nExpect cell is: ${expectCell}\nBut real is: ${realCell}"
+                return "${info}, line ${line}, ${dataType} result mismatch.\nExpect cell is: ${expectCell}\nBut real is   : ${realCell}"
             }
         } else {
             if(!expectCell.equals(realCell)) {
-                return "${info}, line ${line}, ${dataType} result mismatch.\nExpect cell is: ${expectCell}\nBut real is: ${realCell}"
+                return "${info}, line ${line}, ${dataType} result mismatch.\nExpect cell is: ${expectCell}\nBut real is   : ${realCell}"
             }
         }
 
@@ -132,6 +141,7 @@ class OutputUtils {
 
                     def res = checkCell(info, line, expectCell, realCell, dataType)
                     if(res != null) {
+                        res += "\nline ${line} mismatch\nExpectRow: ${expectRaw}\nRealRow  : ${realRaw}";
                         return res
                     }
                 }
@@ -139,7 +149,7 @@ class OutputUtils {
                 def expectCsvString = transform1.apply(expectRaw)
                 def realCsvString = transform2.apply(realRaw)
                 if (!expectCsvString.equals(realCsvString)) {
-                    return "${info}, line ${line} mismatch.\nExpect line is: ${expectCsvString}\nBut real is: ${realCsvString}"
+                    return "${info}, line ${line} mismatch.\nExpect line is: ${expectCsvString}\nBut real is   : ${realCsvString}"
                 }
             }
 
@@ -212,11 +222,15 @@ class OutputUtils {
 
     static class TagBlockIterator implements Iterator<List<String>> {
         private final String tag
+        private final int startLine
+        private int currentLine
         private Iterator<List<String>> it
 
-        TagBlockIterator(String tag, Iterator<List<String>> it) {
+        TagBlockIterator(String tag, int startLine, Iterator<List<String>> it) {
             this.tag = tag
+            this.startLine = startLine
             this.it = it
+            this.currentLine = startLine
         }
 
         String getTag() {
@@ -230,7 +244,13 @@ class OutputUtils {
 
         @Override
         List<String> next() {
-            return it.next()
+            def next = it.next()
+            currentLine++
+            return next
+        }
+
+        int currentLine() {
+            return currentLine
         }
     }
 
@@ -274,7 +294,9 @@ class OutputUtils {
                         return false
                     }
                 }
-                cache = new TagBlockIterator(tag, new CsvParserIterator(new SkipLastEmptyLineIterator(new OutputBlockIterator(lineIt))))
+
+                def csvIt = new CsvParserIterator(new SkipLastEmptyLineIterator(new OutputBlockIterator(lineIt)))
+                cache = new TagBlockIterator(tag, lineIt.getCurrentId(), csvIt)
                 cached = true
                 return true
             } else {

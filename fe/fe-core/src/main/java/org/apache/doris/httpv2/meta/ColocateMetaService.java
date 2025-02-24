@@ -36,7 +36,6 @@ import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestMethod;
 import org.springframework.web.bind.annotation.RestController;
-import org.springframework.web.servlet.view.RedirectView;
 
 import java.lang.reflect.Type;
 import java.util.List;
@@ -78,31 +77,42 @@ public class ColocateMetaService extends RestBaseController {
         GroupId groupId = new GroupId(dbId, grpId);
 
         if (!colocateIndex.isGroupExist(groupId)) {
-            throw new DdlException("the group " + groupId + "isn't  exist");
+            throw new DdlException("the group " + groupId + " isn't exist");
         }
         return groupId;
     }
 
     public Object executeWithoutPassword(HttpServletRequest request, HttpServletResponse response)
-            throws DdlException {
+            throws Exception {
         executeCheckPassword(request, response);
-        RedirectView redirectView = redirectToMaster(request, response);
-        if (redirectView != null) {
-            return redirectView;
-        }
         checkGlobalAuth(ConnectContext.get().getCurrentUserIdentity(), PrivPredicate.ADMIN);
         return null;
     }
 
     @RequestMapping(path = "/api/colocate", method = RequestMethod.GET)
-    public Object colocate(HttpServletRequest request, HttpServletResponse response) throws DdlException {
+    public Object colocate(HttpServletRequest request, HttpServletResponse response) throws Exception {
+        if (needRedirect(request.getScheme())) {
+            return redirectToHttps(request);
+        }
+
+        if (checkForwardToMaster(request)) {
+            return forwardToMaster(request);
+        }
         executeWithoutPassword(request, response);
         return ResponseEntityBuilder.ok(Env.getCurrentColocateIndex());
     }
 
     @RequestMapping(path = "/api/colocate/group_stable", method = {RequestMethod.POST, RequestMethod.DELETE})
     public Object group_stable(HttpServletRequest request, HttpServletResponse response)
-            throws DdlException {
+            throws Exception {
+        if (needRedirect(request.getScheme())) {
+            return redirectToHttps(request);
+        }
+
+        if (checkForwardToMaster(request)) {
+            return forwardToMaster(request);
+        }
+
         executeWithoutPassword(request, response);
         GroupId groupId = checkAndGetGroupId(request);
 
@@ -110,16 +120,19 @@ public class ColocateMetaService extends RestBaseController {
         if ("POST".equalsIgnoreCase(method)) {
             colocateIndex.markGroupUnstable(groupId, "mark unstable via http api", true);
         } else if ("DELETE".equalsIgnoreCase(method)) {
-            colocateIndex.markGroupStable(groupId, true);
+            colocateIndex.markGroupStable(groupId, true, null);
         }
         return ResponseEntityBuilder.ok();
     }
 
     @RequestMapping(path = "/api/colocate/bucketseq", method = RequestMethod.POST)
     public Object bucketseq(HttpServletRequest request, HttpServletResponse response, @RequestBody String meta)
-            throws DdlException {
+            throws Exception {
+        if (needRedirect(request.getScheme())) {
+            return redirectToHttps(request);
+        }
+
         executeWithoutPassword(request, response);
-        final String clusterName = ConnectContext.get().getClusterName();
         GroupId groupId = checkAndGetGroupId(request);
 
         Type type = new TypeToken<List<List<Long>>>() {
@@ -133,7 +146,7 @@ public class ColocateMetaService extends RestBaseController {
                     + groupSchema.getBucketsNum() + ", actual: " + backendsPerBucketSeq.size());
         }
 
-        List<Long> clusterBackendIds = Env.getCurrentSystemInfo().getClusterBackendIds(clusterName, true);
+        List<Long> clusterBackendIds = Env.getCurrentSystemInfo().getAllBackendIds(true);
         //check the Backend id
         for (List<Long> backendIds : backendsPerBucketSeq) {
             if (backendIds.size() != groupSchema.getReplicaAlloc().getTotalReplicaNum()) {
@@ -157,7 +170,7 @@ public class ColocateMetaService extends RestBaseController {
     }
 
     private void updateBackendPerBucketSeq(GroupId groupId, List<List<Long>> backendsPerBucketSeq)
-            throws DdlException {
-        throw new DdlException("Currently not support");
+            throws Exception {
+        throw new Exception("Currently not support");
     }
 }

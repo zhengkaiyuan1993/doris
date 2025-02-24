@@ -31,20 +31,7 @@ suite("test_lag_lead_window") {
         ('b','aa','/wyyt-image/2022/04/13/1434607674511761493.jpg'),
         ('c','cc','/wyyt-image/2022/04/13/1434607674511761493.jpg') """
 
-    sql """ set enable_vectorized_engine = false """
-    qt_select_default """ 
-        select aa, bb, min(cc) over(PARTITION by cc  order by aa) ,
-            lag(cc,1,'unknown') over (PARTITION by cc  order by aa) as lag_cc 
-        from ${tableName}  
-        order by aa; """
-
-    qt_select_default2 """ select aa, bb, min(cc) over(PARTITION by cc  order by aa) ,
-                                  lead(cc,1,'') over (PARTITION by cc  order by aa) as lead_cc 
-                           from ${tableName} 
-                           order by aa; """
-
-    sql """ set enable_vectorized_engine = true """
-    qt_select_default """ 
+    qt_select_default """
         select aa, bb, min(cc) over(PARTITION by cc  order by aa) ,
             lag(cc,1,'unknown') over (PARTITION by cc  order by aa) as lag_cc 
         from ${tableName}  
@@ -64,5 +51,14 @@ suite("test_lag_lead_window") {
     qt_select_default """ select id, create_time, lead(create_time, 1, '2022-09-06 00:00:00') over
                           (order by create_time desc) as "prev_time" from test1; """
     qt_select_default """ select id, create_time, lead(create_time, 1, date_sub('2022-09-06 00:00:00', interval 7 day)) over (order by create_time desc) as "prev_time" from test1; """
+
+    qt_select_lag_1 """ select id, create_time, lag(create_time) over(partition by id) as "prev_time" from test1 order by 1 ,2 ; """
+    qt_select_lag_2 """ select id, create_time, lag(create_time,1) over(partition by id) as "prev_time" from test1 order by 1 ,2 ; """
+    qt_select_lag_3 """ select id, create_time, lag(create_time,1,NULL) over(partition by id) as "prev_time" from test1 order by 1 ,2 ; """
+    qt_select_lag_4 """ select id, create_time, lead(create_time) over(partition by id) as "prev_time" from test1 order by 1 ,2 ; """
+    qt_select_lag_5 """ select id, create_time, lead(create_time,1) over(partition by id) as "prev_time" from test1 order by 1 ,2 ; """
+    qt_select_lag_6 """ select id, create_time, lead(create_time,1,NULL) over(partition by id) as "prev_time" from test1 order by 1 ,2 ; """
+
     sql """ DROP TABLE IF EXISTS test1 """
+
 }

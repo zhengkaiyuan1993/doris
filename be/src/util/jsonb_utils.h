@@ -23,6 +23,7 @@
 
 #include <sstream>
 
+#include "common/exception.h"
 #include "jsonb_document.h"
 #include "jsonb_stream.h"
 #include "jsonb_writer.h"
@@ -40,13 +41,20 @@ public:
 
     // get json string
     const std::string to_json_string(const char* data, size_t size) {
-        doris::JsonbValue* pval = doris::JsonbDocument::createDocument(data, size)->getValue();
+        JsonbDocument* pdoc = doris::JsonbDocument::createDocument(data, size);
+        if (!pdoc) {
+            throw Exception(Status::FatalError("invalid json binary value: {}",
+                                               std::string_view(data, size)));
+        }
+        return to_json_string(pdoc->getValue());
+    }
 
+    const std::string to_json_string(const JsonbValue* val) {
         os_.clear();
         os_.seekp(0);
 
-        if (pval) {
-            intern_json(pval);
+        if (val) {
+            intern_json(val);
         }
 
         os_.put(0);
@@ -94,6 +102,14 @@ private:
         }
         case JsonbType::T_Double: {
             os_.write(((JsonbDoubleVal*)val)->val());
+            break;
+        }
+        case JsonbType::T_Float: {
+            os_.write(((JsonbFloatVal*)val)->val());
+            break;
+        }
+        case JsonbType::T_Int128: {
+            os_.write(((JsonbInt128Val*)val)->val());
             break;
         }
         case JsonbType::T_String: {
@@ -177,7 +193,12 @@ private:
             if (iter->klen()) {
                 string_to_json(iter->getKeyStr(), iter->klen());
             } else {
-                os_.write(iter->getKeyId());
+                // NOTE: we use sMaxKeyId to represent an empty key. see jsonb_writer.h
+                if (iter->getKeyId() == JsonbKeyValue::sMaxKeyId) {
+                    string_to_json(nullptr, 0);
+                } else {
+                    os_.write(iter->getKeyId());
+                }
             }
             os_.put(':');
 

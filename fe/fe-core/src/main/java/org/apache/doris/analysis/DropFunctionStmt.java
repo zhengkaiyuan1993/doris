@@ -25,16 +25,30 @@ import org.apache.doris.common.UserException;
 import org.apache.doris.mysql.privilege.PrivPredicate;
 import org.apache.doris.qe.ConnectContext;
 
-public class DropFunctionStmt extends DdlStmt {
+import com.google.common.base.Joiner;
+
+public class DropFunctionStmt extends DdlStmt implements NotFallbackInParser {
+    private final boolean ifExists;
     private final FunctionName functionName;
     private final FunctionArgsDef argsDef;
+    private SetType type = SetType.DEFAULT;
 
     // set after analyzed
     private FunctionSearchDesc function;
 
-    public DropFunctionStmt(FunctionName functionName, FunctionArgsDef argsDef) {
+    public DropFunctionStmt(SetType type, boolean ifExists, FunctionName functionName, FunctionArgsDef argsDef) {
+        this.type = type;
+        this.ifExists = ifExists;
         this.functionName = functionName;
         this.argsDef = argsDef;
+    }
+
+    public SetType getType() {
+        return type;
+    }
+
+    public boolean isIfExists() {
+        return ifExists;
     }
 
     public FunctionName getFunctionName() {
@@ -50,10 +64,10 @@ public class DropFunctionStmt extends DdlStmt {
         super.analyze(analyzer);
 
         // analyze function name
-        functionName.analyze(analyzer);
+        functionName.analyze(analyzer, this.type);
 
         // check operation privilege
-        if (!Env.getCurrentEnv().getAuth().checkGlobalPriv(ConnectContext.get(), PrivPredicate.ADMIN)) {
+        if (!Env.getCurrentEnv().getAccessManager().checkGlobalPriv(ConnectContext.get(), PrivPredicate.ADMIN)) {
             ErrorReport.reportAnalysisException(ErrorCode.ERR_SPECIFIC_ACCESS_DENIED_ERROR, "ADMIN");
         }
 
@@ -69,8 +83,20 @@ public class DropFunctionStmt extends DdlStmt {
         return stringBuilder.toString();
     }
 
+    public String signatureString() {
+        StringBuilder sb = new StringBuilder();
+        sb.append(functionName.getFunction()).append("(").append(Joiner.on(", ").join(argsDef.getArgTypes()));
+        sb.append(")");
+        return sb.toString();
+    }
+
     @Override
     public RedirectStatus getRedirectStatus() {
         return RedirectStatus.FORWARD_WITH_SYNC;
+    }
+
+    @Override
+    public StmtType stmtType() {
+        return StmtType.DROP;
     }
 }

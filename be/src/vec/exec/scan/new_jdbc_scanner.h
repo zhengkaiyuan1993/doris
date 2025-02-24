@@ -16,30 +16,62 @@
 // under the License.
 
 #pragma once
-#ifdef LIBJVM
 
-#include "runtime/runtime_state.h"
-#include "vec/exec/scan/new_jdbc_scan_node.h"
+#include <gen_cpp/Types_types.h>
+#include <stdint.h>
+
+#include <memory>
+#include <string>
+
+#include "common/factory_creator.h"
+#include "common/global_types.h"
+#include "common/status.h"
+#include "pipeline/exec/jdbc_scan_operator.h"
+#include "util/runtime_profile.h"
 #include "vec/exec/scan/vscanner.h"
 #include "vec/exec/vjdbc_connector.h"
-namespace doris {
-namespace vectorized {
-class NewJdbcScanner : public VScanner {
-public:
-    NewJdbcScanner(RuntimeState* state, NewJdbcScanNode* parent, int64_t limit, TupleId tuple_id,
-                   std::string query_string);
 
+namespace doris {
+class RuntimeState;
+class TupleDescriptor;
+
+namespace vectorized {
+class Block;
+class VExprContext;
+
+class NewJdbcScanner : public VScanner {
+    ENABLE_FACTORY_CREATOR(NewJdbcScanner);
+
+public:
+    friend class JdbcConnector;
+
+    NewJdbcScanner(RuntimeState* state, doris::pipeline::JDBCScanLocalState* parent, int64_t limit,
+                   const TupleId& tuple_id, const std::string& query_string,
+                   TOdbcTableType::type table_type, RuntimeProfile* profile);
     Status open(RuntimeState* state) override;
     Status close(RuntimeState* state) override;
 
-public:
-    Status prepare(RuntimeState* state);
+    Status prepare(RuntimeState* state, const VExprContextSPtrs& conjuncts) override;
 
 protected:
     Status _get_block_impl(RuntimeState* state, Block* block, bool* eos) override;
 
+    RuntimeProfile::Counter* _load_jar_timer = nullptr;
+    RuntimeProfile::Counter* _init_connector_timer = nullptr;
+    RuntimeProfile::Counter* _get_data_timer = nullptr;
+    RuntimeProfile::Counter* _jni_setup_timer = nullptr;
+    RuntimeProfile::Counter* _has_next_timer = nullptr;
+    RuntimeProfile::Counter* _prepare_params_timer = nullptr;
+    RuntimeProfile::Counter* _cast_timer = nullptr;
+    RuntimeProfile::Counter* _read_and_fill_vector_table_timer = nullptr;
+    RuntimeProfile::Counter* _fill_block_timer = nullptr;
+    RuntimeProfile::Counter* _check_type_timer = nullptr;
+    RuntimeProfile::Counter* _execte_read_timer = nullptr;
+    RuntimeProfile::Counter* _connector_close_timer = nullptr;
+
 private:
-    bool _is_init;
+    void _init_profile(const std::shared_ptr<RuntimeProfile>& profile);
+    void _update_profile();
 
     bool _jdbc_eos;
 
@@ -48,11 +80,12 @@ private:
     // SQL
     std::string _query_string;
     // Descriptor of tuples read from JDBC table.
-    const TupleDescriptor* _tuple_desc;
+    const TupleDescriptor* _tuple_desc = nullptr;
+    // the sql query database type: like mysql, PG...
+    TOdbcTableType::type _table_type;
     // Scanner of JDBC.
     std::unique_ptr<JdbcConnector> _jdbc_connector;
     JdbcConnectorParam _jdbc_param;
 };
 } // namespace vectorized
 } // namespace doris
-#endif

@@ -64,7 +64,9 @@ public class SystemController extends BaseController {
         if (Strings.isNullOrEmpty(currentPath)) {
             currentPath = "/";
         }
-        LOG.debug("get /system request, thread id: {}", Thread.currentThread().getId());
+        if (LOG.isDebugEnabled()) {
+            LOG.debug("get /system request, thread id: {}", Thread.currentThread().getId());
+        }
         ResponseEntity entity = appendSystemInfo(currentPath, currentPath, request);
         return entity;
     }
@@ -190,6 +192,10 @@ public class SystemController extends BaseController {
         if (path == null) {
             return "/rest/v1/system";
         } else {
+            final String windowsFileSystemSeparator = "\\";
+            if (windowsFileSystemSeparator.equals(path.getFileSystem().getSeparator())) {
+                return "/rest/v1/system?path=" + path.toString().replace("\\", "/");
+            }
             return "/rest/v1/system?path=" + path.toString();
         }
     }

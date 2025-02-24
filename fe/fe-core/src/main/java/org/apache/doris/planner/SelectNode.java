@@ -32,6 +32,7 @@ import org.apache.doris.thrift.TPlanNodeType;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 
+import java.util.ArrayList;
 import java.util.List;
 
 /**
@@ -40,14 +41,17 @@ import java.util.List;
 public class SelectNode extends PlanNode {
     private static final Logger LOG = LogManager.getLogger(SelectNode.class);
 
-    protected SelectNode(PlanNodeId id, PlanNode child) {
-        super(id, child.getTupleIds(), "SELECT", StatisticalType.SELECT_NODE);
+    /**
+     * Used by nereids only.
+     */
+    public SelectNode(PlanNodeId id, PlanNode child) {
+        super(id, new ArrayList<>(child.getOutputTupleIds()), "SELECT", StatisticalType.SELECT_NODE);
         addChild(child);
         this.nullableTupleIds = child.nullableTupleIds;
     }
 
     protected SelectNode(PlanNodeId id, PlanNode child, List<Expr> conjuncts) {
-        super(id, child.getTupleIds(), "SELECT", StatisticalType.SELECT_NODE);
+        super(id, new ArrayList<>(child.getOutputTupleIds()), "SELECT", StatisticalType.SELECT_NODE);
         addChild(child);
         this.tblRefIds = child.tblRefIds;
         this.nullableTupleIds = child.nullableTupleIds;
@@ -89,7 +93,9 @@ public class SelectNode extends PlanNode {
         } else {
             this.cardinality = Math.round(cardinality * selectivity);
         }
-        LOG.debug("stats Select: cardinality={}", this.cardinality);
+        if (LOG.isDebugEnabled()) {
+            LOG.debug("stats Select: cardinality={}", this.cardinality);
+        }
     }
 
     @Override
@@ -104,8 +110,9 @@ public class SelectNode extends PlanNode {
         return output.toString();
     }
 
+    // Determined by its child.
     @Override
-    public int getNumInstances() {
-        return children.get(0).getNumInstances();
+    public boolean isSerialOperator() {
+        return children.get(0).isSerialOperator();
     }
 }

@@ -49,7 +49,9 @@ suite("test_alter_table_column_nullable") {
     int max_try_secs = 60
     while (max_try_secs--) {
         String res = getJobState(tbName)
-        if (res == "FINISHED") {
+        if (res == "FINISHED" || res == "CANCELLED") {
+            assertEquals("FINISHED", res)
+            sleep(3000)
             break
         } else {
             Thread.sleep(2000)
@@ -85,7 +87,9 @@ suite("test_alter_table_column_nullable") {
     max_try_secs = 60
     while (max_try_secs--) {
         String res = getJobState(tbName)
-        if (res == "FINISHED") {
+        if (res == "FINISHED" || res == "CANCELLED") {
+            assertEquals("FINISHED", res)
+            sleep(3000)
             break
         } else {
             Thread.sleep(2000)
@@ -117,6 +121,7 @@ suite("test_alter_table_column_nullable") {
     while (max_try_secs--) {
         String res = getJobState(tbName)
         if (res == "CANCELLED") {
+            sleep(3000)
             break
         } else {
             Thread.sleep(2000)
@@ -152,7 +157,9 @@ suite("test_alter_table_column_nullable") {
     max_try_secs = 60
     while (max_try_secs--) {
         String res = getJobState(tbName)
-        if (res == "FINISHED") {
+        if (res == "FINISHED" || res == "CANCELLED") {
+            assertEquals("FINISHED", res)
+            sleep(3000)
             break
         } else {
             Thread.sleep(2000)

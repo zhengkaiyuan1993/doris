@@ -15,6 +15,12 @@
 -- specific language governing permissions and limitations
 -- under the License.
 
+insert into show_test_do_not_modify.ex_tb0 values (111, 'abc'), (112, 'abd'), (113, 'abe'),(114, 'abf'),(115, 'abg');
+
+insert into show_test_do_not_modify.ex_tb1 values ('{"k1":"v1", "k2":"v2"}');
+
+insert into show_test_do_not_modify.ex_tb2 values (123, '10'), (123, '15'), (123, '20');
+
 insert into doris_test.test1 values
 (true, 'abc', 'efg', '2022-10-01', 3.4, 1, 2, 0, 100000, 1.2, '2022-10-02 12:59:01', 24.000),
 (true, 'abc', 'efg', '2022-10-01', 3.4, 1, 2, 1, 100000, 1.2, '2022-10-02 12:59:01', 24.000),
@@ -1041,3 +1047,168 @@ insert into doris_test.test1 values
 (false, 'abc', 'efg', '2022-10-01', 4.5, 1, 2, 1022, 100000, 1.2, '2022-10-02 12:59:01', 24.000),
 (false, 'abc', 'efg', '2022-10-01', 4.5, 1, 2, 1023, 100000, 1.2, '2022-10-02 12:59:01', 24.000),
 (false, 'abc', 'efg', '2022-10-01', 4.5, 1, 2, 1024, 100000, 1.2, '2022-10-02 12:59:01', 24.000);
+
+insert into doris_test.ex_tb0 values (111, 'abc'), (112, 'abd'), (113, 'abe'),(114, 'abf'),(115, 'abg');
+analyze table doris_test.ex_tb0;
+
+insert into doris_test.ex_tb1 values ('{"k1":"v1", "k2":"v2"}');
+
+insert into doris_test.ex_tb2 values (123, '10'), (123, '15'), (123, '20');
+
+insert into doris_test.ex_tb3 values
+('mus','plat_code','1001169339',1590420872639,1590420872639,'11','1006061','beijing'),
+('mus','plat_code','1001169339',1590402594411,1590420872639,'11','1006061','beijing'),
+('mus','plat_code','1001169339',1590381433914,1590420872639,'11','1006061','beijing'),
+('mus','plat_code','1001169339',1590406790026,1590420872639,'11','1006061','beijing'),
+('mus','plat_code','1001169339',1590420482288,1590420872639,'11','1006061','beijing');
+
+insert into doris_test.ex_tb4 values
+(1, 111, '2021-09-01 07:01:01', '2021-09-01 08:01:01', 1),
+(2, 112, '2021-09-02 07:01:01', '2021-09-02 08:01:01', 1),
+(3, 113, '0000-01-01 00:00:00', '2021-12-01 08:01:01', 2),
+(5, 115, '2021-09-01 07:02:01', '2021-09-01 08:01:04', 4),
+(6, 116, '2021-10-01 07:03:01', '2022-09-01 08:02:05', 5);
+
+insert into doris_test.ex_tb5 values (1, 'test_apply_id', '123321', 'zhangsan', 'zhangsan', 'ready', 'ok', 2, '2022-01-01 02:03:04');
+
+insert into doris_test.ex_tb6 values (639215401565159424,1143681147589283841,'test'),(639237839376089088,1143681147589283841,"test123");
+
+INSERT INTO doris_test.ex_tb7 VALUES ('2','sim',1.000), ('2','sim',1.001), ('2','sim',1.002);
+
+insert into doris_test.ex_tb8 values ('2022-07-15', '2222', 1, NULL), ('2022-07-15', 'ddddd', 2, '0.5');
+
+insert into doris_test.ex_tb9 values ('2022-01-01'), (null);
+
+insert into doris_test.ex_tb10 values ('a', 1, 2), ('b', 1, 2), ('c', 1, 2), ('d', 3, 2);
+
+insert into doris_test.ex_tb11 values ('a', 1), ('b', 1), ('c', 1);
+
+insert into doris_test.ex_tb12 values ('a', 1), ('b', 1), ('c', 1);
+
+insert into doris_test.ex_tb13 values
+('张三0',11,'1234567','123','321312','1999-02-13','中国','男',false),
+('张三1',11,'12345678','123','321312','1999-02-13','中国','男',false),
+('张三2',11,'12345671','123','321312','1999-02-13','中国','男',false),
+('张三3',11,'12345673','123','321312','1999-02-13','中国','男',false),
+('张三4',11,'123456711','123','321312','1999-02-13','中国','男',false),
+('张三5',11,'1232134567','123','321312','1999-02-13','中国','男',false),
+('张三6',11,'124314567','123','321312','1999-02-13','中国','男',false),
+('张三7',11,'123445167','123','321312','1998-02-13','中国','男',false);
+
+insert into doris_test.ex_tb14 values
+('abc', '2022-11-02 20:30:00', '2022-11-02', '8011', 'agdtb'),
+('bca', '2022-11-02 20:31:00', '2022-11-02', '8012', 'vivo'),
+('123', '2022-11-02 20:32:00', '2022-11-02', '8011', 'oppo');
+
+INSERT INTO doris_test.ex_tb15 VALUES
+('2022-11-04','2022-10-31','2022-11-04',62,5410345144.6,72113869936.064819,21,10,16,'-','-','2022-11-04 17:40:19');
+
+INSERT INTO doris_test.ex_tb16 (id,name,is_delete,create_uid,modify_uid,ctime,mtime) VALUES
+(1,'e',0,7,5,6,3), (2,'b',0,1,5,4,5), (4,'b',0,3,4,2,7), (4,'c',0,3,9,3,7), (7,'d',0,6,1,5,6), (8,'c',0,1,7,1,5),
+(2,'a',0,3,4,1,6), (2,'c',0,5,7,9,1), (3,'e',0,2,4,3,4), (5,'e',0,5,7,9,2), (6,'a',0,1,1,8,8), (3,'d',0,2,7,1,5),
+(6,'b',0,3,9,1,6), (3,'a',0,7,9,4,8), (5,'b',0,6,6,2,9), (7,'a',0,1,1,3,8), (9,'c',0,8,3,9,8), (5,'c',0,8,5,7,6),
+(6,'e',0,1,9,7,6), (8,'e',0,4,4,5,4), (1,'d',0,7,6,1,7), (4,'a',0,5,7,4,1), (9,'e',0,9,1,9,7), (1,'b',0,4,4,8,8),
+(1,'c',0,9,9,5,4), (3,'b',0,4,9,8,1), (9,'b',0,2,1,4,2), (2,'d',0,4,4,8,4), (4,'d',0,1,5,6,4), (5,'a',0,1,2,2,1),
+(7,'b',0,3,2,8,1), (9,'a',0,8,3,9,1), (1,'a',0,4,3,6,8), (2,'e',0,6,4,7,8), (6,'d',0,1,2,4,7), (7,'c',0,3,7,7,1),
+(5,'d',0,6,2,7,7), (6,'c',0,3,1,3,8), (7,'e',0,6,1,3,7), (8,'a',0,3,2,8,2), (8,'b',0,4,9,4,9), (9,'d',0,6,6,5,3);
+
+INSERT INTO doris_test.ex_tb17 (id,media_order_id,supplier_id,agent_policy_type,agent_policy,capital_type,petty_cash_type,recharge_amount,need_actual_amount,voucher_url,ctime,mtime,is_delete,media_remark,account_number,currency_type,order_source) VALUES
+(2,8,9,8,2900.42,1,6,97486621.73,59634489.39,'c',3,2,0,'a','e',7,4),(3,5,7,3,6276.86,8,9,32758730.38,10260499.72,'c',8,1,0,'d','c',9,2),
+(6,3,6,8,7601.25,4,9,49117098.47,46499188.8,'c',3,3,0,'c','d',4,8), (8,3,6,7,3683.85,5,7,26056250.91,1127755.43,'b',7,6,0,'d','b',4,7),
+(1,6,1,1,2099.18,3,8,1554296.82,68781940.49,'d',8,5,0,'d','a',7,9), (4,3,7,5,2449,6,3,91359059.28,64743145.92,'e',7,8,0,'b','d',8,4),
+(7,3,2,8,5297.81,9,3,23753694.2,96930000.64,'c',7,2,0,'b','e',1,5), (9,3,9,1,4785.38,1,5,95199488.12,94869703.42,'a',4,4,0,'c','d',2,4),
+(5,6,4,5,9137.82,2,7,26526675.7,90098303.36,'a',6,7,0,'d','e',4,1);
+
+INSERT INTO doris_test.ex_tb18 VALUES
+(1,1,1,1,1,1,1,1,1,1,3.14,13.141,2342.23,'aa','asdawdasdaasdasd','aaa','bbbbbbbb','xaqwdqwdqwdqdwqwdqwdqd','asdadwqdqwddqwdsadqwdas'),
+(127,255,32767, 65535, 8388607, 16777215, 9223372036854775807, -2147483648, 2147483647, 4294967295,33.1415926,422113.1411231,2342.23123123,'aa','asdawdasdaasdasd','aaa','bbbbbbbb','xaqwdqwdqwdqd','asdadwqdqwdsadqwdas'),
+(-128,255,-32768, 65535, -8388608, 16777215, -9223372036854775808, -2147483648, 2147483647, 4294967295,33.1415926,422113.1411231,2342.23123123,'aa','asdawdasdaasdasd','aaa','bbbbbbbb','xaqwdqwdqwdqd','asdas');
+
+INSERT INTO doris_test.ex_tb19 VALUES
+('2022-11-27', '07:09:51', '2022', '2022-11-27 07:09:51', '2022-11-27 07:09:51');
+
+INSERT INTO doris_test.ex_tb20 VALUES
+(1.12345, 1.12345, 1.12345, 1.12345, 1.12345, 1.12345),
+(123456789012345678901234567890123.12345, 12345678901234567890123456789012.12345, 1234567890123456789012345678901234.12345, 123456789012345678901234567890123.12345,
+123456789012345678901234567890123456789012345678901234567890.12345, 123456789012345678901234567890123456789012345678901234567890.12345);
+
+INSERT INTO doris_test.all_types VALUES
+(201, 301, 401, 501, 601, 3.14159, 4.1415926, 5.141592, true, -123, -301, 2012, -401, -501, -601, '2012-10-30', '2012-10-25 12:05:36.3456712', '2012-10-25 08:08:08.3456712',
+ -4.14145001, -5.1400000001, -6.140000001, 'row1', 'line1', '09:09:09.56782346', 'text1', X'48656C6C6F20576F726C64', '{"name": "Alice", "age": 30, "city": "London"}',
+ 'Option1,Option3', b'101010', X'48656C6C6F', X'48656C6C6F', 'Value2'),
+(202, 302, 402, 502, 602, 4.14159, 5.1415926, 6.141592, false, -124, -302, 2013, -402, -502, -602, '2012-11-01', '2012-10-26 02:08:39.3456712', '2013-10-26 08:09:18.3456712',
+ -5.14145001, -6.1400000001, -7.140000001, 'row2', 'line2', '09:11:09.56782346', 'text2', X'E86F6C6C6F20576F726C67', '{"name": "Gaoxin", "age": 18, "city": "ChongQing"}',
+ 'Option1,Option2', b'101111', X'58676C6C6F', X'88656C6C9F', 'Value3'),
+(null, 302, null, 502, 602, 4.14159, null, 6.141592, null, -124, -302, 2013, -402, -502, -602, null, '2012-10-26 02:08:39.3456712', '2013-10-26 08:09:18.3456712',
+ -5.14145001, null, -7.140000001, 'row2', null, '09:11:09.56782346', 'text2', X'E86F6C6C6F20576F726C67', null,
+ null, b'101111', null, X'88656C6C9F', 'Value3'),
+(203, 303, 403, 503, 603, 7.14159, 8.1415926, 9.141592, false, null, -402, 2017, -602, -902, -1102, '2012-11-02', null, '2013-10-27 08:11:18.3456712',
+ -5.14145000001, -6.1400000000001, -7.140000000001, 'row3', 'line3', '09:11:09.56782346', 'text3', X'E86F6C6C6F20576F726C67', '{"name": "ChenQi", "age": 24, "city": "ChongQing"}',
+ 'Option2', b'101111', X'58676C6C6F', null, 'Value1');
+
+INSERT INTO doris_test.dt (`timestamp0`, `timestamp1`, `timestamp2`, `timestamp3`, `timestamp4`, `timestamp5`, `timestamp6`)
+VALUES ('2023-06-17 10:00:00', '2023-06-17 10:00:01.1', '2023-06-17 10:00:02.22', '2023-06-17 10:00:03.333', 
+        '2023-06-17 10:00:04.4444', '2023-06-17 10:00:05.55555', '2023-06-17 10:00:06.666666');
+
+SET SESSION sql_mode=(SELECT REPLACE(@@sql_mode,'STRICT_TRANS_TABLES',''));
+INSERT INTO doris_test.dt_null
+VALUES ('2023-06-17 10:00:00'),('0000-00-00 00:00:00'),('0000-01-01 00:00:00');
+
+
+insert into doris_test.test_key_word values (1, 1), (2, 2);
+
+SET SESSION sql_mode=(SELECT REPLACE(@@sql_mode,'NO_ZERO_DATE',''));
+SET SESSION sql_mode=(SELECT REPLACE(@@sql_mode,'NO_ZERO_IN_DATE',''));
+
+insert into doris_test.test_zd (id,d_z) VALUES (1,'0000-00-00'),(2,'2022-01-01'),(3,'0000-01-01');
+
+insert into Doris.DORIS values ('DORIS');
+insert into Doris.Doris values ('Doris');
+insert into Doris.doris values ('doris');
+
+insert into doris_test.compoundpredicate_test(pk,col_int_undef_signed,col_int_undef_signed2) values (0,null,23868),(1,68,-18),(2,19030,-125),(3,16539,null),(4,null,null),(5,null,-127),(6,14680,-26424),(7,-22270,12722),(8,null,null),(9,null,null),(10,null,7744),(11,null,-94),(12,16970,95),(13,null,7023),(14,null,1),(15,3679,-11),(16,null,-1079),(17,-22,null),(18,30995,null),(19,null,-79);
+
+insert into doris_test.text_push values('a'),('aa'),('aaa');
+
+insert into doris_test.all_types_nullable
+values(0,0,0,0,0, 0, 0.00, 0.00000, 0.0000000000, 0.000000000000000000000000000000,0,0,false,-128,-32768,-8388608,-2147483648,-9223372036854775808,-1.7976931348623157E+308,-3.4028234E+38,-9999999999,-9999999.99,-9999999999999.99999,-9999999999999999999999999999.9999999999,-99999999999999999999999999999999999.999999999999999999999999999999,1901,'-838:59:59','-838:59:59.000','-838:59:59.000000','1000-01-01','1000-01-01 00:00:00','1970-01-01 00:00:01','1970-01-01 00:00:01.000','1970-01-01 00:00:01.000000','','','', '',  '{}', '',  b'000000',  '',  '', 'Value1'),
+(255,65535,16777215,4294967295,18446744073709551615,9999999999, 9999999.99, 9999999999999.99999, 9999999999999999999999999999.9999999999, 99999999999999999999999999999999999.999999999999999999999999999999,1.7976931348623157E+308,3.4028234E+38,true,127,32767,8388607,2147483647,9223372036854775807,1.7976931348623157E+308,3.4028234E+38,9999999999,9999999.99,9999999999999.99999,9999999999999999999999999999.9999999999,99999999999999999999999999999999999.999999999999999999999999999999,2155,'838:59:59.000','838:59:59.000','838:59:59.000000','9999-12-31','9999-12-31 23:59:59','2038-01-19 03:14:07','2038-01-19 03:14:07.499','2038-01-19 03:14:07.499999','zzzz','abcdefgh','max', 'maxBLOB', '{"key": "maxJSON"}', 'Option1,Option2,Option3', b'111111', 'maxBIN', 'maxVARBIN', 'Value3'),
+(0,0,0,0,0, 0, 0.00, 0.00000, 0.0000000000, 0.000000000000000000000000000000, 0, 0, false, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1901, '00:00:00', '00:00:00.000', '00:00:00.000000','1000-01-01','1000-01-01 00:00:00','1970-01-01 00:00:01','1970-01-01 00:00:01.000','1970-01-01 00:00:01.000000', '', '', '', '', '{}', '', b'', '', '', 'Value1'),
+(NULL,NULL,NULL,NULL,NULL, NULL, NULL, NULL, NULL, NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL);
+
+insert into doris_test.all_types_non_nullable
+values(0,0,0,0,0, 0, 0.00, 0.00000, 0.0000000000, 0.000000000000000000000000000000,0,0,false,-128,-32768,-8388608,-2147483648,-9223372036854775808,-1.7976931348623157E+308,-3.4028234E+38,-9999999999,-9999999.99,-9999999999999.99999,-9999999999999999999999999999.9999999999,-99999999999999999999999999999999999.999999999999999999999999999999,1901,'-838:59:59','-838:59:59.000','-838:59:59.000000','1000-01-01','1000-01-01 00:00:00','1970-01-01 00:00:01','1970-01-01 00:00:01.000','1970-01-01 00:00:01.000000','','','', '',  '{}', '',  b'000000',  '',  '', 'Value1'),
+(255,65535,16777215,4294967295,18446744073709551615,9999999999, 9999999.99, 9999999999999.99999, 9999999999999999999999999999.9999999999, 99999999999999999999999999999999999.999999999999999999999999999999,1.7976931348623157E+308,3.4028234E+38,true,127,32767,8388607,2147483647,9223372036854775807,1.7976931348623157E+308,3.4028234E+38,9999999999,9999999.99,9999999999999.99999,9999999999999999999999999999.9999999999,99999999999999999999999999999999999.999999999999999999999999999999,2155,'838:59:59.000','838:59:59.000','838:59:59.000000','9999-12-31','9999-12-31 23:59:59','2038-01-19 03:14:07','2038-01-19 03:14:07.499','2038-01-19 03:14:07.499999','zzzz','abcdefgh','max', 'maxBLOB', '{"key": "maxJSON"}', 'Option1,Option2,Option3', b'111111', 'maxBIN', 'maxVARBIN', 'Value3'),
+(0,0,0,0,0, 0, 0.00, 0.00000, 0.0000000000, 0.000000000000000000000000000000, 0, 0, false, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1901, '00:00:00', '00:00:00.000', '00:00:00.000000','1000-01-01','1000-01-01 00:00:00','1970-01-01 00:00:01','1970-01-01 00:00:01.000','1970-01-01 00:00:01.000000', '', '', '', '', '{}', '', b'', '', '', 'Value1');
+
+insert into doris_test.all_types_multi_block select * from doris_test.all_types_nullable;
+insert into doris_test.all_types_multi_block select * from doris_test.all_types_multi_block;
+insert into doris_test.all_types_multi_block select * from doris_test.all_types_multi_block;
+insert into doris_test.all_types_multi_block select * from doris_test.all_types_multi_block;
+insert into doris_test.all_types_multi_block select * from doris_test.all_types_multi_block;
+insert into doris_test.all_types_multi_block select * from doris_test.all_types_multi_block;
+insert into doris_test.all_types_multi_block select * from doris_test.all_types_multi_block;
+insert into doris_test.all_types_multi_block select * from doris_test.all_types_multi_block;
+insert into doris_test.all_types_multi_block select * from doris_test.all_types_multi_block;
+insert into doris_test.all_types_multi_block select * from doris_test.all_types_multi_block;
+insert into doris_test.all_types_multi_block select * from doris_test.all_types_multi_block;
+insert into doris_test.all_types_multi_block select * from doris_test.all_types_nullable;
+
+INSERT INTO doris_test.t_varchar (varchar_col) VALUES ('a');
+
+INSERT INTO doris_test.t_varchar (varchar_col) VALUES ('中');
+
+INSERT INTO doris_test.t_varchar (varchar_col) VALUES (REPEAT('a', 21844));
+
+INSERT INTO doris_test.t_varchar (varchar_col) VALUES (REPEAT('中', 21844));
+
+INSERT INTO doris_test.t_char (char_col) VALUES (REPEAT('a', 255));
+
+INSERT INTO doris_test.t_char (char_col) VALUES (REPEAT('中', 255));
+
+INSERT INTO doris_test.`test_cast` VALUES (1, '1', '2022-01-01', '2022-01-01 00:00:01');
+INSERT INTO doris_test.`test_cast` VALUES (2, '2', '2022-01-02', '2022-01-02 00:00:01');
+
+ANALYZE TABLE Doris.doris;
+ANALYZE TABLE Doris.DORIS;
+ANALYZE TABLE Doris.Doris;

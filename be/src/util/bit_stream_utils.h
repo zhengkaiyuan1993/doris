@@ -82,7 +82,7 @@ private:
     // buffer_. This is faster than writing values byte by byte directly to buffer_.
     uint64_t buffered_values_;
 
-    faststring* buffer_;
+    faststring* buffer_ = nullptr;
     int byte_offset_; // Offset in buffer_
     int bit_offset_;  // Offset in buffered_values_
 };
@@ -111,7 +111,15 @@ public:
 
     // Reads a vlq encoded int from the stream.  The encoded int must start at the
     // beginning of a byte. Return false if there were not enough bytes in the buffer.
-    bool GetVlqInt(int32_t* v);
+    bool GetVlqInt(uint32_t* v);
+    // Reads a zigzag encoded int `into` v.
+    bool GetZigZagVlqInt(int32_t* v);
+
+    // Reads a vlq encoded int from the stream.  The encoded int must start at the
+    // beginning of a byte. Return false if there were not enough bytes in the buffer.
+    bool GetVlqInt(uint64_t* v);
+    // Reads a zigzag encoded int `into` v.
+    bool GetZigZagVlqInt(int64_t* v);
 
     // Returns the number of bytes left in the stream, not including the current byte (i.e.,
     // there may be an additional fraction of a byte).
@@ -123,20 +131,30 @@ public:
     // Rewind the stream by 'num_bits' bits
     void Rewind(int num_bits);
 
+    // Advance the stream by 'num_bits' bits
+    bool Advance(int64_t num_bits);
+
     // Seek to a specific bit in the buffer
     void SeekToBit(unsigned int stream_position);
 
     // Maximum byte length of a vlq encoded int
     static const int MAX_VLQ_BYTE_LEN = 5;
 
+    // Maximum byte length of a vlq encoded int64
+    static const int MAX_VLQ_BYTE_LEN_FOR_INT64 = 10;
+
     bool is_initialized() const { return buffer_ != nullptr; }
+
+    const uint8_t* buffer() const { return buffer_; }
+
+    int max_bytes() const { return max_bytes_; }
 
 private:
     // Used by SeekToBit() and GetValue() to fetch the
     // the next word into buffer_.
     void BufferValues();
 
-    const uint8_t* buffer_;
+    const uint8_t* buffer_ = nullptr;
     int max_bytes_;
 
     // Bytes are memcpy'd from buffer_ and values are read from this variable. This is

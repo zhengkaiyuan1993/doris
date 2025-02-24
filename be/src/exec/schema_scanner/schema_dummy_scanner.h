@@ -17,16 +17,23 @@
 
 #pragma once
 
+#include "common/status.h"
 #include "exec/schema_scanner.h"
 
 namespace doris {
+class RuntimeState;
+namespace vectorized {
+class Block;
+} // namespace vectorized
 
 class SchemaDummyScanner : public SchemaScanner {
+    ENABLE_FACTORY_CREATOR(SchemaDummyScanner);
+
 public:
     SchemaDummyScanner();
-    virtual ~SchemaDummyScanner();
-    virtual Status start(RuntimeState* state = nullptr);
-    virtual Status get_next_row(Tuple* tuple, MemPool* pool, bool* eos);
+    ~SchemaDummyScanner() override;
+    Status start(RuntimeState* state = nullptr) override;
+    Status get_next_block_internal(vectorized::Block* block, bool* eos) override;
 };
 
 } // namespace doris

@@ -17,52 +17,48 @@
 
 #include "runtime/memory/thread_mem_tracker_mgr.h"
 
+#include <gen_cpp/types.pb.h>
+
 #include "runtime/exec_env.h"
-#include "runtime/fragment_mgr.h"
-#include "runtime/memory/mem_tracker_task_pool.h"
-#include "service/backend_options.h"
 
 namespace doris {
 
 void ThreadMemTrackerMgr::attach_limiter_tracker(
-        const std::string& task_id, const TUniqueId& fragment_instance_id,
         const std::shared_ptr<MemTrackerLimiter>& mem_tracker) {
     DCHECK(mem_tracker);
-    flush_untracked_mem<false>();
-    _task_id_stack.push_back(task_id);
-    _fragment_instance_id_stack.push_back(fragment_instance_id);
-    _limiter_tracker_stack.push_back(mem_tracker);
-    _limiter_tracker_raw = mem_tracker.get();
+    CHECK(init());
+    flush_untracked_mem();
+    _last_attach_snapshots_stack.push_back(
+            {_limiter_tracker, _wg_wptr, _reserved_mem, _consumer_tracker_stack});
+    if (_reserved_mem != 0) {
+        // _untracked_mem temporary store bytes that not synchronized to process reserved memory,
+        // but bytes have been subtracted from thread _reserved_mem.
+        doris::GlobalMemoryArbitrator::shrink_process_reserved(_untracked_mem);
+        _limiter_tracker->shrink_reserved(_untracked_mem);
+        _reserved_mem = 0;
+        _untracked_mem = 0;
+    }
+    _consumer_tracker_stack.clear();
+    _limiter_tracker = mem_tracker;
+}
+
+void ThreadMemTrackerMgr::attach_limiter_tracker(
+        const std::shared_ptr<MemTrackerLimiter>& mem_tracker,
+        const std::weak_ptr<WorkloadGroup>& wg_wptr) {
+    attach_limiter_tracker(mem_tracker);
+    _wg_wptr = wg_wptr;
 }
 
 void ThreadMemTrackerMgr::detach_limiter_tracker() {
-    DCHECK(!_limiter_tracker_stack.empty());
-    flush_untracked_mem<false>();
-    _task_id_stack.pop_back();
-    _fragment_instance_id_stack.pop_back();
-    _limiter_tracker_stack.pop_back();
-    _limiter_tracker_raw = _limiter_tracker_stack.back().get();
-}
-
-void ThreadMemTrackerMgr::exceeded_cancel_task(const std::string& cancel_details) {
-    if (_fragment_instance_id_stack.back() != TUniqueId()) {
-        ExecEnv::GetInstance()->fragment_mgr()->cancel(
-                _fragment_instance_id_stack.back(), PPlanFragmentCancelReason::MEMORY_LIMIT_EXCEED,
-                cancel_details);
-    }
-}
-
-void ThreadMemTrackerMgr::exceeded(const std::string& failed_msg) {
-    if (_cb_func != nullptr) {
-        _cb_func();
-    }
-    auto cancel_msg = _limiter_tracker_raw->mem_limit_exceeded(
-            fmt::format("exec node:<{}>", last_consumer_tracker()),
-            _limiter_tracker_raw->parent().get(), failed_msg);
-    if (is_attach_query()) {
-        exceeded_cancel_task(cancel_msg);
-    }
-    _check_limit = false; // Make sure it will only be canceled once
+    CHECK(init());
+    flush_untracked_mem();
+    shrink_reserved();
+    DCHECK(!_last_attach_snapshots_stack.empty());
+    _limiter_tracker = _last_attach_snapshots_stack.back().limiter_tracker;
+    _wg_wptr = _last_attach_snapshots_stack.back().wg_wptr;
+    _reserved_mem = _last_attach_snapshots_stack.back().reserved_mem;
+    _consumer_tracker_stack = _last_attach_snapshots_stack.back().consumer_tracker_stack;
+    _last_attach_snapshots_stack.pop_back();
 }
 
 } // namespace doris

@@ -26,7 +26,10 @@ import org.apache.doris.common.AnalysisException;
 import org.apache.doris.common.ErrorCode;
 import org.apache.doris.common.ErrorReport;
 import org.apache.doris.common.UserException;
+import org.apache.doris.qe.ConnectContext;
 import org.apache.doris.rewrite.ExprRewriter;
+import org.apache.doris.rewrite.mvrewrite.CountDistinctToBitmapOrHLLRule;
+import org.apache.doris.thrift.TQueryOptions;
 
 import com.google.common.base.Preconditions;
 import com.google.common.collect.Lists;
@@ -51,7 +54,8 @@ import java.util.stream.Collectors;
  * Used for sharing members/methods and some of the analysis code, in particular the
  * analysis of the ORDER BY and LIMIT clauses.
  */
-public abstract class QueryStmt extends StatementBase implements Queriable {
+@Deprecated
+public abstract class QueryStmt extends StatementBase implements Queriable, NotFallbackInParser {
     private static final Logger LOG = LogManager.getLogger(QueryStmt.class);
 
     /////////////////////////////////////////
@@ -97,6 +101,8 @@ public abstract class QueryStmt extends StatementBase implements Queriable {
      * in "order by" or "group by" clauses with their corresponding result expr.
      */
     protected final ExprSubstitutionMap aliasSMap;
+
+    protected final ExprSubstitutionMap mvSMap;
 
     /**
      * Select list item alias does not have to be unique.
@@ -164,10 +170,15 @@ public abstract class QueryStmt extends StatementBase implements Queriable {
      */
     private Set<TupleId> disableTuplesMVRewriter = Sets.newHashSet();
 
+    protected boolean toSQLWithSelectList;
+    protected boolean isPointQuery;
+    protected boolean toSQLWithHint;
+
     QueryStmt(ArrayList<OrderByElement> orderByElements, LimitElement limitElement) {
         this.orderByElements = orderByElements;
         this.limitElement = limitElement;
         this.aliasSMap = new ExprSubstitutionMap();
+        this.mvSMap = new ExprSubstitutionMap();
         this.ambiguousAliasList = Lists.newArrayList();
         this.sortInfo = null;
     }
@@ -185,11 +196,6 @@ public abstract class QueryStmt extends StatementBase implements Queriable {
     }
 
     private void analyzeLimit(Analyzer analyzer) throws AnalysisException {
-        // TODO chenhao
-        if (limitElement.getOffset() > 0 && !hasOrderByClause()) {
-            throw new AnalysisException("OFFSET requires an ORDER BY clause: "
-                    + limitElement.toSql().trim());
-        }
         limitElement.analyze(analyzer);
     }
 
@@ -263,16 +269,30 @@ public abstract class QueryStmt extends StatementBase implements Queriable {
         this.needToSql = needToSql;
     }
 
+    public boolean isDisableTuplesMVRewriter(Expr expr) {
+        if (disableTuplesMVRewriter.isEmpty()) {
+            return false;
+        }
+        return expr.isBoundByTupleIds(disableTuplesMVRewriter.stream().collect(Collectors.toList()));
+    }
+
     protected Expr rewriteQueryExprByMvColumnExpr(Expr expr, Analyzer analyzer) throws AnalysisException {
+        if (analyzer == null || analyzer.getMVExprRewriter() == null) {
+            return expr;
+        }
+        ExprRewriter rewriter;
         if (forbiddenMVRewrite) {
-            return expr;
+            rewriter = new ExprRewriter(Lists.newArrayList(CountDistinctToBitmapOrHLLRule.INSTANCE),
+                    Lists.newArrayList());
+        } else {
+            rewriter = analyzer.getMVExprRewriter();
+            rewriter.reset();
+            rewriter.setInfoMVRewriter(disableTuplesMVRewriter, mvSMap, aliasSMap);
         }
-        if (expr.isBoundByTupleIds(disableTuplesMVRewriter.stream().collect(Collectors.toList()))) {
-            return expr;
-        }
-        ExprRewriter rewriter = analyzer.getMVExprRewriter();
-        rewriter.reset();
-        return rewriter.rewrite(expr, analyzer);
+        rewriter.setUpBottom();
+
+        Expr result = rewriter.rewrite(expr, analyzer);
+        return result;
     }
 
     /**
@@ -302,7 +322,7 @@ public abstract class QueryStmt extends StatementBase implements Queriable {
             isAscOrder.add(Boolean.valueOf(orderByElement.getIsAsc()));
             nullsFirstParams.add(orderByElement.getNullsFirstParam());
         }
-        substituteOrdinalsAliases(orderingExprs, "ORDER BY", analyzer);
+        substituteOrdinalsAliases(orderingExprs, "ORDER BY", analyzer, true);
 
         // save the order by element after analyzed
         orderByElementsAfterAnalyzed = Lists.newArrayList();
@@ -343,7 +363,9 @@ public abstract class QueryStmt extends StatementBase implements Queriable {
                 strBuilder.append("or an insert/ctas statement has no effect on the query result ");
                 strBuilder.append("unless a LIMIT and/or OFFSET is used in conjunction ");
                 strBuilder.append("with the ORDER BY.");
-                LOG.debug(strBuilder.toString());
+                if (LOG.isDebugEnabled()) {
+                    LOG.debug(strBuilder.toString());
+                }
             }
         } else {
             evaluateOrderBy = true;
@@ -415,7 +437,7 @@ public abstract class QueryStmt extends StatementBase implements Queriable {
      * Modifies exprs list in-place.
      */
     protected void substituteOrdinalsAliases(List<Expr> exprs, String errorPrefix,
-                                             Analyzer analyzer) throws AnalysisException {
+                                             Analyzer analyzer, boolean aliasFirst) throws AnalysisException {
         Expr ambiguousAlias = getFirstAmbiguousAlias(exprs);
         if (ambiguousAlias != null) {
             ErrorReport.reportAnalysisException(ErrorCode.ERR_NON_UNIQ_ERROR, ambiguousAlias.toColumnLabel());
@@ -430,7 +452,21 @@ public abstract class QueryStmt extends StatementBase implements Queriable {
             // alias substitution is not performed in the same way.
             Expr substituteExpr = trySubstituteOrdinal(expr, errorPrefix, analyzer);
             if (substituteExpr == null) {
-                substituteExpr = expr.trySubstitute(aliasSMap, analyzer, false);
+                if (aliasFirst) {
+                    substituteExpr = expr.trySubstitute(aliasSMap, analyzer, false);
+                } else {
+                    try {
+                        // use col name from tableRefs first
+                        substituteExpr = expr.clone();
+                        substituteExpr.analyze(analyzer);
+                    } catch (AnalysisException ex) {
+                        if (ConnectContext.get() != null) {
+                            ConnectContext.get().getState().reset();
+                        }
+                        // then consider alias name
+                        substituteExpr = expr.trySubstitute(aliasSMap, analyzer, false);
+                    }
+                }
             }
             i.set(substituteExpr);
         }
@@ -490,15 +526,19 @@ public abstract class QueryStmt extends StatementBase implements Queriable {
 
 
     @Override
-    public void foldConstant(ExprRewriter rewriter) throws AnalysisException {
+    public void foldConstant(ExprRewriter rewriter, TQueryOptions tQueryOptions) throws AnalysisException {
         Preconditions.checkState(isAnalyzed());
         Map<String, Expr> exprMap = new HashMap<>();
         collectExprs(exprMap);
-        rewriter.rewriteConstant(exprMap, analyzer);
+        rewriter.rewriteConstant(exprMap, analyzer, tQueryOptions);
         if (rewriter.changed()) {
             putBackExprs(exprMap);
         }
 
+    }
+
+    @Override
+    public void rewriteElementAtToSlot(ExprRewriter rewriter, TQueryOptions tQueryOptions) throws AnalysisException {
     }
 
 
@@ -533,6 +573,18 @@ public abstract class QueryStmt extends StatementBase implements Queriable {
         return false;
     }
 
+    public Expr getExprFromAliasSMapDirect(Expr expr) throws AnalysisException {
+        return expr.trySubstitute(aliasSMap, analyzer, false);
+    }
+
+
+    public Expr getExprFromAliasSMap(Expr expr) throws AnalysisException {
+        if (!analyzer.getContext().getSessionVariable().isGroupByAndHavingUseAliasFirst()) {
+            return expr;
+        }
+        return getExprFromAliasSMapDirect(expr);
+    }
+
     // get tables used by this query.
     // Set<String> parentViewNameSet contain parent stmt view name
     // to make sure query like "with tmp as (select * from db1.table1) " +
@@ -552,6 +604,8 @@ public abstract class QueryStmt extends StatementBase implements Queriable {
      * UnionStmt and SelectStmt have different implementations.
      */
     public abstract ArrayList<String> getColLabels();
+
+    public abstract ArrayList<List<String>> getSubColPath();
 
     /**
      * Returns the materialized tuple ids of the output of this stmt.
@@ -608,10 +662,11 @@ public abstract class QueryStmt extends StatementBase implements Queriable {
         return limitElement.getLimit();
     }
 
-    public void setLimit(long limit) throws AnalysisException {
+    public void setLimit(long limit) {
         Preconditions.checkState(limit >= 0);
         long newLimit = hasLimitClause() ? Math.min(limit, getLimit()) : limit;
-        limitElement = new LimitElement(newLimit);
+        long offset = hasLimitClause() ? getOffset() : 0;
+        limitElement = new LimitElement(offset, newLimit);
     }
 
     public void removeLimitElement() {
@@ -745,10 +800,12 @@ public abstract class QueryStmt extends StatementBase implements Queriable {
         resultExprs = Expr.cloneList(other.resultExprs);
         baseTblResultExprs = Expr.cloneList(other.baseTblResultExprs);
         aliasSMap = other.aliasSMap.clone();
+        mvSMap = other.mvSMap.clone();
         ambiguousAliasList = Expr.cloneList(other.ambiguousAliasList);
         sortInfo = (other.sortInfo != null) ? other.sortInfo.clone() : null;
         analyzer = other.analyzer;
         evaluateOrderBy = other.evaluateOrderBy;
+        disableTuplesMVRewriter = other.disableTuplesMVRewriter;
     }
 
     @Override
@@ -777,6 +834,10 @@ public abstract class QueryStmt extends StatementBase implements Queriable {
         this.fromInsert = value;
     }
 
+    public boolean isFromInsert() {
+        return fromInsert;
+    }
+
     @Override
     public abstract QueryStmt clone();
 
@@ -793,5 +854,23 @@ public abstract class QueryStmt extends StatementBase implements Queriable {
 
     public boolean hasOutFileClause() {
         return outFileClause != null;
+    }
+
+    public String toSqlWithSelectList() {
+        toSQLWithSelectList = true;
+        return toSql();
+    }
+
+    public boolean isPointQuery() {
+        return isPointQuery;
+    }
+
+    public String toSqlWithHint() {
+        toSQLWithHint = true;
+        return toSql();
+    }
+
+    public void setToSQLWithHint(boolean enableSqlSqlWithHint) {
+        this.toSQLWithHint = enableSqlSqlWithHint;
     }
 }

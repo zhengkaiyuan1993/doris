@@ -17,19 +17,25 @@
 
 package org.apache.doris.nereids.trees.expressions;
 
-import org.apache.doris.catalog.Env;
-import org.apache.doris.common.AnalysisException;
-import org.apache.doris.nereids.trees.expressions.functions.ExecutableFunctions;
+import org.apache.doris.nereids.exceptions.NotSupportedException;
+import org.apache.doris.nereids.trees.expressions.functions.BoundFunction;
 import org.apache.doris.nereids.trees.expressions.functions.agg.AggregateFunction;
+import org.apache.doris.nereids.trees.expressions.functions.executable.DateTimeAcquire;
+import org.apache.doris.nereids.trees.expressions.functions.executable.DateTimeArithmetic;
+import org.apache.doris.nereids.trees.expressions.functions.executable.DateTimeExtractAndTransform;
+import org.apache.doris.nereids.trees.expressions.functions.executable.NumericArithmetic;
+import org.apache.doris.nereids.trees.expressions.functions.executable.StringArithmetic;
+import org.apache.doris.nereids.trees.expressions.functions.executable.TimeRoundSeries;
+import org.apache.doris.nereids.trees.expressions.literal.DateLiteral;
+import org.apache.doris.nereids.trees.expressions.literal.DateTimeLiteral;
 import org.apache.doris.nereids.trees.expressions.literal.Literal;
-import org.apache.doris.nereids.trees.expressions.literal.NullLiteral;
-import org.apache.doris.nereids.types.DataType;
 
+import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMultimap;
 
+import java.lang.reflect.Array;
 import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
-import java.util.ArrayList;
 import java.util.Collection;
 import java.util.List;
 
@@ -37,8 +43,10 @@ import java.util.List;
  * An expression evaluator that evaluates the value of an expression.
  */
 public enum ExpressionEvaluator {
+
     INSTANCE;
-    private ImmutableMultimap<String, FunctionInvoker> functions;
+
+    private ImmutableMultimap<String, Method> functions;
 
     ExpressionEvaluator() {
         registerFunctions();
@@ -48,68 +56,120 @@ public enum ExpressionEvaluator {
      * Evaluate the value of the expression.
      */
     public Expression eval(Expression expression) {
-
-        if (!expression.isConstant() || expression instanceof AggregateFunction) {
+        if (!(expression.isConstant() || expression.foldable()) || expression instanceof AggregateFunction) {
             return expression;
         }
 
         String fnName = null;
-        DataType[] args = null;
         if (expression instanceof BinaryArithmetic) {
             BinaryArithmetic arithmetic = (BinaryArithmetic) expression;
             fnName = arithmetic.getLegacyOperator().getName();
-            args = new DataType[]{arithmetic.left().getDataType(), arithmetic.right().getDataType()};
         } else if (expression instanceof TimestampArithmetic) {
             TimestampArithmetic arithmetic = (TimestampArithmetic) expression;
             fnName = arithmetic.getFuncName();
-            args = new DataType[]{arithmetic.left().getDataType(), arithmetic.right().getDataType()};
+        } else if (expression instanceof BoundFunction) {
+            BoundFunction function = ((BoundFunction) expression);
+            fnName = function.getName();
         }
 
-        if ((Env.getCurrentEnv().isNullResultWithOneNullParamFunction(fnName))) {
-            for (Expression e : expression.children()) {
-                if (e instanceof NullLiteral) {
-                    return Literal.of(null);
-                }
-            }
-        }
-
-        return invoke(expression, fnName, args);
+        return invoke(expression, fnName);
     }
 
-    private Expression invoke(Expression expression, String fnName, DataType[] args) {
-        FunctionSignature signature = new FunctionSignature(fnName, args, null);
-        FunctionInvoker invoker = getFunction(signature);
-        if (invoker != null) {
+    private Expression invoke(Expression expression, String fnName) {
+        Method method = getFunction(fnName, expression.children());
+        if (method != null) {
             try {
-                return invoker.invoke(expression.children());
-            } catch (AnalysisException e) {
+                int varSize = method.getParameterTypes().length;
+                if (varSize == 0) {
+                    return (Literal) method.invoke(null, expression.children().toArray());
+                }
+                boolean hasVarArgs = method.getParameterTypes()[varSize - 1].isArray();
+                if (hasVarArgs) {
+                    int fixedArgsSize = varSize - 1;
+                    int inputSize = expression.children().size();
+                    Class<?>[] parameterTypes = method.getParameterTypes();
+                    Class<?> parameterType = parameterTypes[varSize - 1];
+                    Class<?> componentType = parameterType.getComponentType();
+                    Object varArgs = Array.newInstance(componentType, inputSize - fixedArgsSize);
+                    for (int i = fixedArgsSize; i < inputSize; i++) {
+                        Array.set(varArgs, i - fixedArgsSize, expression.children().get(i));
+                    }
+                    Object[] objects = new Object[fixedArgsSize + 1];
+                    for (int i = 0; i < fixedArgsSize; i++) {
+                        objects[i] = expression.children().get(i);
+                    }
+                    objects[fixedArgsSize] = varArgs;
+
+                    return (Literal) method.invoke(null, objects);
+                }
+                return (Literal) method.invoke(null, expression.children().toArray());
+            } catch (InvocationTargetException e) {
+                if (e.getTargetException() instanceof NotSupportedException) {
+                    throw new NotSupportedException(e.getTargetException().getMessage());
+                } else {
+                    return expression;
+                }
+            } catch (IllegalAccessException | IllegalArgumentException e) {
                 return expression;
             }
         }
         return expression;
     }
 
-    private FunctionInvoker getFunction(FunctionSignature signature) {
-        Collection<FunctionInvoker> functionInvokers = functions.get(signature.getName());
-        if (functionInvokers == null) {
-            return null;
+    private boolean canDownCastTo(Class<?> expect, Class<?> input) {
+        if (DateLiteral.class.isAssignableFrom(expect)
+                || DateTimeLiteral.class.isAssignableFrom(expect)) {
+            return expect.equals(input);
         }
-        for (FunctionInvoker candidate : functionInvokers) {
-            DataType[] candidateTypes = candidate.getSignature().getArgTypes();
-            DataType[] expectedTypes = signature.getArgTypes();
+        return expect.isAssignableFrom(input);
+    }
 
-            if (candidateTypes.length != expectedTypes.length) {
-                continue;
-            }
+    private Method getFunction(String fnName, List<Expression> inputs) {
+        Collection<Method> expectMethods = functions.get(fnName);
+        for (Method expect : expectMethods) {
             boolean match = true;
-            for (int i = 0; i < candidateTypes.length; i++) {
-                if (!candidateTypes[i].equals(expectedTypes[i])) {
-                    match = false;
-                    break;
+            int varSize = expect.getParameterTypes().length;
+            if (varSize == 0) {
+                if (inputs.size() == 0) {
+                    return expect;
+                } else {
+                    continue;
+                }
+            }
+            boolean hasVarArgs = expect.getParameterTypes()[varSize - 1].isArray();
+            if (hasVarArgs) {
+                int fixedArgsSize = varSize - 1;
+                int inputSize = inputs.size();
+                if (inputSize <= fixedArgsSize) {
+                    continue;
+                }
+                Class<?>[] expectVarTypes = expect.getParameterTypes();
+                for (int i = 0; i < fixedArgsSize; i++) {
+                    if (!canDownCastTo(expectVarTypes[i], inputs.get(i).getClass())) {
+                        match = false;
+                    }
+                }
+                Class<?> varArgsType = expectVarTypes[varSize - 1];
+                Class<?> varArgType = varArgsType.getComponentType();
+                for (int i = fixedArgsSize; i < inputSize; i++) {
+                    if (!canDownCastTo(varArgType, inputs.get(i).getClass())) {
+                        match = false;
+                    }
+                }
+            } else {
+                int inputSize = inputs.size();
+                if (inputSize != varSize) {
+                    continue;
+                }
+                Class<?>[] expectVarTypes = expect.getParameterTypes();
+                for (int i = 0; i < varSize; i++) {
+                    if (!canDownCastTo(expectVarTypes[i], inputs.get(i).getClass())) {
+                        match = false;
+                    }
                 }
             }
             if (match) {
-                return candidate;
+                return expect;
             }
         }
         return null;
@@ -119,90 +179,34 @@ public enum ExpressionEvaluator {
         if (functions != null) {
             return;
         }
-        ImmutableMultimap.Builder<String, FunctionInvoker> mapBuilder =
-                new ImmutableMultimap.Builder<String, FunctionInvoker>();
-        Class clazz = ExecutableFunctions.class;
-        for (Method method : clazz.getDeclaredMethods()) {
-            ExecFunctionList annotationList = method.getAnnotation(ExecFunctionList.class);
-            if (annotationList != null) {
-                for (ExecFunction f : annotationList.value()) {
-                    registerFEFunction(mapBuilder, method, f);
+        ImmutableMultimap.Builder<String, Method> mapBuilder = new ImmutableMultimap.Builder<>();
+        List<Class<?>> classes = ImmutableList.of(
+                DateTimeAcquire.class,
+                DateTimeExtractAndTransform.class,
+                DateLiteral.class,
+                DateTimeArithmetic.class,
+                NumericArithmetic.class,
+                StringArithmetic.class,
+                TimeRoundSeries.class
+        );
+        for (Class<?> cls : classes) {
+            for (Method method : cls.getDeclaredMethods()) {
+                ExecFunctionList annotationList = method.getAnnotation(ExecFunctionList.class);
+                if (annotationList != null) {
+                    for (ExecFunction f : annotationList.value()) {
+                        registerFEFunction(mapBuilder, method, f);
+                    }
                 }
+                registerFEFunction(mapBuilder, method, method.getAnnotation(ExecFunction.class));
             }
-            registerFEFunction(mapBuilder, method, method.getAnnotation(ExecFunction.class));
         }
         this.functions = mapBuilder.build();
     }
 
-    private void registerFEFunction(ImmutableMultimap.Builder<String, FunctionInvoker> mapBuilder,
+    private void registerFEFunction(ImmutableMultimap.Builder<String, Method> mapBuilder,
             Method method, ExecFunction annotation) {
         if (annotation != null) {
-            String name = annotation.name();
-            DataType returnType = DataType.convertFromString(annotation.returnType());
-            List<DataType> argTypes = new ArrayList<>();
-            for (String type : annotation.argTypes()) {
-                argTypes.add(DataType.convertFromString(type));
-            }
-            FunctionSignature signature = new FunctionSignature(name,
-                    argTypes.toArray(new DataType[argTypes.size()]), returnType);
-            mapBuilder.put(name, new FunctionInvoker(method, signature));
+            mapBuilder.put(annotation.name(), method);
         }
     }
-
-    /**
-     * function invoker.
-     */
-    public static class FunctionInvoker {
-        private final Method method;
-        private final FunctionSignature signature;
-
-        public FunctionInvoker(Method method, FunctionSignature signature) {
-            this.method = method;
-            this.signature = signature;
-        }
-
-        public Method getMethod() {
-            return method;
-        }
-
-        public FunctionSignature getSignature() {
-            return signature;
-        }
-
-        public Literal invoke(List<Expression> args) throws AnalysisException {
-            try {
-                return (Literal) method.invoke(null, args.toArray());
-            } catch (InvocationTargetException | IllegalAccessException | IllegalArgumentException e) {
-                throw new AnalysisException(e.getLocalizedMessage());
-            }
-        }
-    }
-
-    /**
-     * function signature.
-     */
-    public static class FunctionSignature {
-        private final String name;
-        private final DataType[] argTypes;
-        private final DataType returnType;
-
-        public FunctionSignature(String name, DataType[] argTypes, DataType returnType) {
-            this.name = name;
-            this.argTypes = argTypes;
-            this.returnType = returnType;
-        }
-
-        public DataType[] getArgTypes() {
-            return argTypes;
-        }
-
-        public DataType getReturnType() {
-            return returnType;
-        }
-
-        public String getName() {
-            return name;
-        }
-    }
-
 }

@@ -24,6 +24,17 @@
 #include <mutex>
 
 #include "common/status.h"
+#include "jni.h"
+#include "jni_md.h"
+
+_JNI_IMPORT_OR_EXPORT_ jint JNICALL JNI_GetCreatedJavaVMs(JavaVM** vm_buf, jsize bufLen,
+                                                          jsize* numVMs) {
+    return doris::LibJVMLoader::JNI_GetCreatedJavaVMs(vm_buf, bufLen, numVMs);
+}
+
+_JNI_IMPORT_OR_EXPORT_ jint JNICALL JNI_CreateJavaVM(JavaVM** pvm, void** penv, void* args) {
+    return doris::LibJVMLoader::JNI_CreateJavaVM(pvm, penv, args);
+}
 
 namespace {
 
@@ -38,7 +49,7 @@ doris::Status resolve_symbol(T& pointer, void* handle, const char* symbol) {
     pointer = reinterpret_cast<T>(dlsym(handle, symbol));
     return (pointer != nullptr)
                    ? doris::Status::OK()
-                   : doris::Status::RuntimeError("Failed to resolve the symbol %s", symbol);
+                   : doris::Status::RuntimeError("Failed to resolve the symbol {}", symbol);
 }
 
 } // namespace
@@ -71,7 +82,7 @@ LibJVMLoader& LibJVMLoader::instance() {
 
 Status LibJVMLoader::load() {
     if (_library.empty()) {
-        return Status::RuntimeError("Failed to find the library %s.", LIBJVM_SO);
+        return Status::RuntimeError("Failed to find the library {}.", LIBJVM_SO);
     }
 
     static std::once_flag resolve_symbols;

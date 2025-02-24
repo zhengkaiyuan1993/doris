@@ -18,22 +18,27 @@
 package org.apache.doris.analysis;
 
 import org.apache.doris.catalog.PrimitiveType;
+import org.apache.doris.catalog.ScalarType;
 import org.apache.doris.catalog.Type;
 import org.apache.doris.common.AnalysisException;
 import org.apache.doris.common.Config;
+import org.apache.doris.common.FormatOptions;
 import org.apache.doris.common.NotImplementedException;
 import org.apache.doris.thrift.TExprNode;
 import org.apache.doris.thrift.TExprNodeType;
 import org.apache.doris.thrift.TFloatLiteral;
 
+import com.google.gson.annotations.SerializedName;
+
 import java.io.DataInput;
-import java.io.DataOutput;
 import java.io.IOException;
 import java.math.BigDecimal;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
+import java.text.NumberFormat;
 
-public class FloatLiteral extends LiteralExpr {
+public class FloatLiteral extends NumericLiteralExpr {
+    @SerializedName("v")
     private double value;
 
     public FloatLiteral() {
@@ -115,8 +120,14 @@ public class FloatLiteral extends LiteralExpr {
 
     @Override
     public int compareLiteral(LiteralExpr expr) {
+        if (expr instanceof PlaceHolderExpr) {
+            return this.compareLiteral(((PlaceHolderExpr) expr).getLiteral());
+        }
         if (expr instanceof NullLiteral) {
             return 1;
+        }
+        if (expr == MaxLiteral.MAX_VALUE) {
+            return -1;
         }
         return Double.compare(value, expr.getDoubleValue());
     }
@@ -133,7 +144,39 @@ public class FloatLiteral extends LiteralExpr {
         if (type.equals(Type.TIME) || type.equals(Type.TIMEV2)) {
             return timeStrFromFloat(value);
         }
-        return Double.toString(value);
+        NumberFormat nf = NumberFormat.getInstance();
+        nf.setGroupingUsed(false);
+        if (type == Type.FLOAT) {
+            nf.setMaximumFractionDigits(7);
+        } else {
+            nf.setMaximumFractionDigits(16);
+        }
+        return nf.format(value);
+    }
+
+    @Override
+    public String getStringValueInFe(FormatOptions options) {
+        if (type == Type.TIME || type == Type.TIMEV2) {
+            // FloatLiteral used to represent TIME type, here we need to remove apostrophe from timeStr
+            // for example '11:22:33' -> 11:22:33
+            String timeStr = getStringValue();
+            return timeStr.substring(1, timeStr.length() - 1);
+        } else {
+            if (Double.isInfinite(getValue())) {
+                return Double.toString(getValue());
+            }
+            return BigDecimal.valueOf(getValue()).toPlainString();
+        }
+    }
+
+    @Override
+    public String getStringValueForArray(FormatOptions options) {
+        String ret = getStringValue();
+        if (type == Type.TIME || type == Type.TIMEV2) {
+            // here already wrapped in ''
+            ret = ret.substring(1, ret.length() - 1);
+        }
+        return options.getNestedStringWrapper() + ret + options.getNestedStringWrapper();
     }
 
     public static Type getDefaultTimeType(Type type) throws AnalysisException {
@@ -183,9 +226,16 @@ public class FloatLiteral extends LiteralExpr {
                 return floatLiteral;
             }
             return this;
-        } else if (targetType.isDecimalV2() || targetType.isDecimalV3()) {
+        } else if (targetType.isDecimalV2()) {
             // the double constructor does an exact translation, use valueOf() instead.
-            return new DecimalLiteral(BigDecimal.valueOf(value));
+            DecimalLiteral res = new DecimalLiteral(BigDecimal.valueOf(value));
+            res.setType(targetType);
+            return res;
+        } else if (targetType.isDecimalV3()) {
+            DecimalLiteral res = new DecimalLiteral(new BigDecimal(value));
+            res.setType(ScalarType.createDecimalV3Type(targetType.getPrecision(),
+                    ((ScalarType) targetType).decimalScale()));
+            return res;
         }
         return this;
     }
@@ -194,12 +244,6 @@ public class FloatLiteral extends LiteralExpr {
     public void swapSign() throws NotImplementedException {
         // swapping sign does not change the type
         value = -value;
-    }
-
-    @Override
-    public void write(DataOutput out) throws IOException {
-        super.write(out);
-        out.writeDouble(value);
     }
 
     public void readFields(DataInput in) throws IOException {
@@ -232,4 +276,15 @@ public class FloatLiteral extends LiteralExpr {
         return "'" + timeStr + String.format("%02d:%02d:%02d", hour, minute, second) + "'";
     }
 
+    @Override
+    public void setupParamFromBinary(ByteBuffer data, boolean isUnsigned) {
+        if (type.getPrimitiveType() == PrimitiveType.FLOAT) {
+            value = data.getFloat();
+            return;
+        }
+        if (type.getPrimitiveType() == PrimitiveType.DOUBLE) {
+            value = data.getDouble();
+            return;
+        }
+    }
 }
