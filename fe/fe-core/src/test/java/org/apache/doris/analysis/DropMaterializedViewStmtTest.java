@@ -18,7 +18,7 @@
 package org.apache.doris.analysis;
 
 import org.apache.doris.common.UserException;
-import org.apache.doris.mysql.privilege.PaloAuth;
+import org.apache.doris.mysql.privilege.AccessControllerManager;
 import org.apache.doris.mysql.privilege.PrivPredicate;
 import org.apache.doris.qe.ConnectContext;
 
@@ -33,7 +33,7 @@ public class DropMaterializedViewStmtTest {
     @Mocked
     Analyzer analyzer;
     @Mocked
-    PaloAuth auth;
+    AccessControllerManager accessManager;
 
     @Test
     public void testEmptyMVName(@Injectable TableName tableName) {
@@ -50,8 +50,8 @@ public class DropMaterializedViewStmtTest {
     public void testNoPermission(@Injectable TableName tableName) {
         new Expectations() {
             {
-                auth.checkTblPriv(ConnectContext.get(), tableName.getDb(),
-                        tableName.getTbl(), PrivPredicate.DROP);
+                accessManager.checkTblPriv(ConnectContext.get(), tableName.getCtl(), tableName.getDb(),
+                        tableName.getTbl(), PrivPredicate.ALTER);
                 result = false;
             }
         };

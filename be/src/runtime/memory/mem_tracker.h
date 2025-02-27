@@ -15,112 +15,44 @@
 // specific language governing permissions and limitations
 // under the License.
 // This file is copied from
-// https://github.com/apache/impala/blob/branch-2.9.0/be/src/runtime/mem-tracker.h
-// and modified by Doris
 #pragma once
 
-#include "util/pretty_printer.h"
-#include "util/runtime_profile.h"
+#include <cstdint>
+#include <string>
+
+#include "runtime/memory/mem_counter.h"
 
 namespace doris {
 
-// Used to track memory usage.
-//
-// MemTracker can be consumed manually by consume()/release(), or put into SCOPED_CONSUME_MEM_TRACKER,
-// which will automatically track all memory usage of the code segment where it is located.
-//
-// This class is thread-safe.
-class MemTracker {
+/*
+ * can be consumed manually by consume()/release(), or put into SCOPED_CONSUME_MEM_TRACKER,
+ * which will automatically track all memory usage of the code segment where it is located.
+ *
+ * This class is thread-safe.
+*/
+class MemTracker final {
 public:
-    struct Snapshot {
-        std::string label;
-        // For MemTracker, it is only weakly related to parent through label, ensuring MemTracker Independence.
-        // For MemTrackerLimiter, it is strongly related to parent and saves pointer objects to each other.
-        std::string parent = "";
-        size_t level = 0;
-        int64_t limit = 0;
-        int64_t cur_consumption = 0;
-        int64_t peak_consumption = 0;
-        size_t child_count = 0;
-    };
+    MemTracker() = default;
+    MemTracker(std::string label) : _label(std::move(label)) {};
+    ~MemTracker() = default;
 
-    // Creates and adds the tracker to the mem_tracker_pool.
-    MemTracker(const std::string& label, RuntimeProfile* profile = nullptr);
-    // For MemTrackerLimiter
-    MemTracker() { _bind_group_num = -1; }
+    void consume(int64_t bytes) { _mem_counter.add(bytes); }
+    void consume_no_update_peak(int64_t bytes) { _mem_counter.add_no_update_peak(bytes); }
+    void release(int64_t bytes) { _mem_counter.sub(bytes); }
+    void set_consumption(int64_t bytes) { _mem_counter.set(bytes); }
+    int64_t consumption() const { return _mem_counter.current_value(); }
+    int64_t peak_consumption() const { return _mem_counter.peak_value(); }
 
-    ~MemTracker();
-
-    // Get a global tracker with a specified label, and the tracker will be created when the label is first get.
-    // use SCOPED_CONSUME_MEM_TRACKER count the memory in the scope to a global tracker with the specified label name.
-    // which is usually used for debugging, to finding memory hotspots.
-    static std::shared_ptr<MemTracker> get_global_mem_tracker(const std::string& label);
-    static void make_global_mem_tracker_snapshot(std::vector<MemTracker::Snapshot>* snapshots);
-
-    static std::string print_bytes(int64_t bytes) {
-        return bytes >= 0 ? PrettyPrinter::print(bytes, TUnit::BYTES)
-                          : "-" + PrettyPrinter::print(std::abs(bytes), TUnit::BYTES);
-    }
-
-public:
     const std::string& label() const { return _label; }
-    // Returns the memory consumed in bytes.
-    int64_t consumption() const { return _consumption->current_value(); }
-    int64_t peak_consumption() const { return _consumption->value(); }
-
-    void consume(int64_t bytes);
-    void release(int64_t bytes) { consume(-bytes); }
-    // Transfer 'bytes' of consumption from this tracker to 'dst'.
-    void transfer_to(MemTracker* dst, int64_t bytes);
-
-public:
-    bool limit_exceeded(int64_t limit) const { return limit >= 0 && limit < consumption(); }
-    // Return true, no exceeded limit
-    bool check_limit(int64_t limit, int64_t bytes) const {
-        return limit >= 0 && limit > consumption() + bytes;
+    std::string log_usage() const {
+        return fmt::format("MemTracker name={}, Used={}({} B), Peak={}({} B)", _label,
+                           MemCounter::print_bytes(consumption()), consumption(),
+                           MemCounter::print_bytes(peak_consumption()), peak_consumption());
     }
 
-    Snapshot make_snapshot(size_t level) const;
-    // Specify group_num from mem_tracker_pool to generate snapshot, requiring tracker.label to be related
-    // with parameter related_label
-    static void make_group_snapshot(std::vector<Snapshot>* snapshots, size_t level,
-                                    int64_t group_num, std::string related_label);
-    static std::string log_usage(MemTracker::Snapshot snapshot);
-
-    std::string debug_string() {
-        std::stringstream msg;
-        msg << "label: " << _label << "; "
-            << "consumption: " << consumption() << "; "
-            << "peak_consumption: " << peak_consumption() << "; ";
-        return msg.str();
-    }
-
-    static const std::string COUNTER_NAME;
-
-protected:
-    // label used in the make snapshot, not guaranteed unique.
-    std::string _label;
-
-    std::shared_ptr<RuntimeProfile::HighWaterMarkCounter> _consumption; // in bytes
-
-    // Tracker is located in group num in mem_tracker_pool
-    int64_t _bind_group_num;
-
-    // Iterator into mem_tracker_pool for this object. Stored to have O(1) remove.
-    std::list<MemTracker*>::iterator _tracker_group_it;
+private:
+    MemCounter _mem_counter;
+    std::string _label {"None"};
 };
-
-inline void MemTracker::consume(int64_t bytes) {
-    if (bytes == 0) {
-        return;
-    } else {
-        _consumption->add(bytes);
-    }
-}
-
-inline void MemTracker::transfer_to(MemTracker* dst, int64_t bytes) {
-    release(bytes);
-    dst->consume(bytes);
-}
 
 } // namespace doris

@@ -17,27 +17,64 @@
 
 #pragma once
 
+#include <gen_cpp/PlanNodes_types.h>
+
 #include "common/status.h"
+#include "runtime/descriptors.h"
 #include "runtime/types.h"
+#include "util/profile_collector.h"
+#include "vec/exprs/vexpr_fwd.h"
 
 namespace doris::vectorized {
+#include "common/compile_check_begin.h"
 
 class Block;
 // This a reader interface for all file readers.
 // A GenericReader is responsible for reading a file and return
 // a set of blocks with specified schema,
-class GenericReader {
+class GenericReader : public ProfileCollector {
 public:
-    virtual Status get_next_block(Block* block, size_t* read_rows, bool* eof) = 0;
-    virtual std::unordered_map<std::string, TypeDescriptor> get_name_to_type() {
-        std::unordered_map<std::string, TypeDescriptor> map;
-        return map;
+    GenericReader() : _push_down_agg_type(TPushAggOp::type::NONE) {}
+    void set_push_down_agg_type(TPushAggOp::type push_down_agg_type) {
+        _push_down_agg_type = push_down_agg_type;
     }
+
+    virtual Status get_next_block(Block* block, size_t* read_rows, bool* eof) = 0;
+
     virtual Status get_columns(std::unordered_map<std::string, TypeDescriptor>* name_to_type,
                                std::unordered_set<std::string>* missing_cols) {
         return Status::NotSupported("get_columns is not implemented");
     }
-    virtual ~GenericReader() = default;
+
+    virtual Status get_parsed_schema(std::vector<std::string>* col_names,
+                                     std::vector<TypeDescriptor>* col_types) {
+        return Status::NotSupported("get_parsed_schema is not implemented for this reader.");
+    }
+    ~GenericReader() override = default;
+
+    /// If the underlying FileReader has filled the partition&missing columns,
+    /// The FileScanner does not need to fill
+    virtual bool fill_all_columns() const { return _fill_all_columns; }
+
+    /// Tell the underlying FileReader the partition&missing columns,
+    /// and the FileReader determine to fill columns or not.
+    /// Should set _fill_all_columns = true, if fill the columns.
+    virtual Status set_fill_columns(
+            const std::unordered_map<std::string, std::tuple<std::string, const SlotDescriptor*>>&
+                    partition_columns,
+            const std::unordered_map<std::string, VExprContextSPtr>& missing_columns) {
+        return Status::OK();
+    }
+
+    virtual Status close() { return Status::OK(); }
+
+protected:
+    const size_t _MIN_BATCH_SIZE = 4064; // 4094 - 32(padding)
+
+    /// Whether the underlying FileReader has filled the partition&missing columns
+    bool _fill_all_columns = false;
+    TPushAggOp::type _push_down_agg_type {};
 };
 
+#include "common/compile_check_end.h"
 } // namespace doris::vectorized

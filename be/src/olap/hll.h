@@ -17,19 +17,17 @@
 
 #pragma once
 
-#include <math.h>
-#include <parallel_hashmap/phmap.h>
-#include <stdio.h>
-
+#include <cstdint>
+#include <cstring>
 #include <map>
-#include <set>
 #include <string>
+#include <utility>
 
 #ifdef __x86_64__
 #include <immintrin.h>
 #endif
 
-#include "gutil/macros.h"
+#include "vec/common/hash_table/phmap_fwd_decl.h"
 
 namespace doris {
 
@@ -110,7 +108,7 @@ public:
         }
     }
 
-    HyperLogLog(HyperLogLog&& other) {
+    HyperLogLog(HyperLogLog&& other) noexcept {
         this->_type = other._type;
         switch (other._type) {
         case HLL_DATA_EMPTY:
@@ -132,7 +130,7 @@ public:
         }
     }
 
-    HyperLogLog& operator=(HyperLogLog&& other) {
+    HyperLogLog& operator=(HyperLogLog&& other) noexcept {
         if (this != &other) {
             if (_registers != nullptr) {
                 delete[] _registers;
@@ -198,10 +196,10 @@ public:
         _registers = nullptr;
     }
 
-    typedef uint8_t SetTypeValueType;
-    typedef int32_t SparseLengthValueType;
-    typedef uint16_t SparseIndexType;
-    typedef uint8_t SparseValueType;
+    using SetTypeValueType = uint8_t;
+    using SparseLengthValueType = int32_t;
+    using SparseIndexType = uint16_t;
+    using SparseValueType = uint8_t;
 
     // Add a hash value to this HLL value
     // NOTE: input must be a hash_value
@@ -214,10 +212,11 @@ public:
 
     size_t memory_consumed() const {
         size_t size = sizeof(*this);
-        if (_type == HLL_DATA_EXPLICIT)
+        if (_type == HLL_DATA_EXPLICIT) {
             size += _hash_set.size() * sizeof(uint64_t);
-        else if (_type == HLL_DATA_SPARSE || _type == HLL_DATA_FULL)
+        } else if (_type == HLL_DATA_SPARSE || _type == HLL_DATA_FULL) {
             size += HLL_REGISTERS_COUNT;
+        }
         return size;
     }
 
@@ -232,13 +231,7 @@ public:
 
     int64_t estimate_cardinality() const;
 
-    static std::string empty() {
-        static HyperLogLog hll;
-        std::string buf;
-        buf.resize(HLL_EMPTY_SIZE);
-        hll.serialize((uint8_t*)buf.c_str());
-        return buf;
-    }
+    static HyperLogLog empty() { return HyperLogLog {}; }
 
     // Check if input slice is a valid serialized binary of HyperLogLog.
     // This function only check the encoded type in slice, whose complex
@@ -246,7 +239,7 @@ public:
     static bool is_valid(const Slice& slice);
 
     // only for debug
-    std::string to_string() {
+    std::string to_string() const {
         switch (_type) {
         case HLL_DATA_EMPTY:
             return {};
@@ -265,14 +258,6 @@ public:
             return {};
         }
     }
-
-private:
-    HllDataType _type = HLL_DATA_EMPTY;
-    phmap::flat_hash_set<uint64_t> _hash_set;
-
-    // This field is much space consuming(HLL_REGISTERS_COUNT), we create
-    // it only when it is really needed.
-    uint8_t* _registers = nullptr;
 
 private:
     void _convert_explicit_to_register();
@@ -309,65 +294,13 @@ private:
         }
 #endif
     }
-};
 
-// todo(kks): remove this when dpp_sink class was removed
-class HllSetResolver {
-public:
-    HllSetResolver()
-            : _buf_ref(nullptr),
-              _buf_len(0),
-              _set_type(HLL_DATA_EMPTY),
-              _full_value_position(nullptr),
-              _explicit_value(nullptr),
-              _explicit_num(0) {}
+    HllDataType _type = HLL_DATA_EMPTY;
+    vectorized::flat_hash_set<uint64_t> _hash_set;
 
-    ~HllSetResolver() {}
-
-    typedef uint8_t SetTypeValueType;
-    typedef uint8_t ExplicitLengthValueType;
-    typedef int32_t SparseLengthValueType;
-    typedef uint16_t SparseIndexType;
-    typedef uint8_t SparseValueType;
-
-    // only save pointer
-    void init(char* buf, int len) {
-        this->_buf_ref = buf;
-        this->_buf_len = len;
-    }
-
-    // hll set type
-    HllDataType get_hll_data_type() { return _set_type; }
-
-    // explicit value num
-    int get_explicit_count() { return (int)_explicit_num; }
-
-    // get explicit index value 64bit
-    uint64_t get_explicit_value(int index) {
-        if (index >= _explicit_num) {
-            return -1;
-        }
-        return _explicit_value[index];
-    }
-
-    // get full register value
-    char* get_full_value() { return _full_value_position; }
-
-    // get (index, value) map
-    std::map<SparseIndexType, SparseValueType>& get_sparse_map() { return _sparse_map; }
-
-    // parse set , call after copy() or init()
-    void parse();
-
-private:
-    char* _buf_ref;        // set
-    int _buf_len;          // set len
-    HllDataType _set_type; //set type
-    char* _full_value_position;
-    uint64_t* _explicit_value;
-    ExplicitLengthValueType _explicit_num;
-    std::map<SparseIndexType, SparseValueType> _sparse_map;
-    SparseLengthValueType* _sparse_count;
+    // This field is much space consuming(HLL_REGISTERS_COUNT), we create
+    // it only when it is really needed.
+    uint8_t* _registers = nullptr;
 };
 
 } // namespace doris

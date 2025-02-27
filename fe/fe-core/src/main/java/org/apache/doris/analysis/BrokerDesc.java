@@ -18,13 +18,19 @@
 package org.apache.doris.analysis;
 
 import org.apache.doris.analysis.StorageBackend.StorageType;
-import org.apache.doris.backup.BlobStorage;
+import org.apache.doris.catalog.Env;
+import org.apache.doris.common.FeMetaVersion;
 import org.apache.doris.common.io.Text;
 import org.apache.doris.common.io.Writable;
 import org.apache.doris.common.util.PrintableMap;
+import org.apache.doris.datasource.property.S3ClientBEProperties;
+import org.apache.doris.datasource.property.constants.BosProperties;
+import org.apache.doris.fs.PersistentFileSystem;
+import org.apache.doris.persist.gson.GsonUtils;
 import org.apache.doris.thrift.TFileType;
 
 import com.google.common.collect.Maps;
+import com.google.gson.annotations.SerializedName;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 
@@ -47,6 +53,8 @@ public class BrokerDesc extends StorageDesc implements Writable {
     // just for multi load
     public static final String MULTI_LOAD_BROKER = "__DORIS_MULTI_LOAD_BROKER__";
     public static final String MULTI_LOAD_BROKER_BACKEND_KEY = "__DORIS_MULTI_LOAD_BROKER_BACKEND__";
+    @SerializedName("cts3")
+    private boolean convertedToS3 = false;
 
     // Only used for recovery
     private BrokerDesc() {
@@ -63,43 +71,42 @@ public class BrokerDesc extends StorageDesc implements Writable {
 
     public BrokerDesc(String name, Map<String, String> properties) {
         this.name = name;
-        this.properties = properties;
-        if (this.properties == null) {
-            this.properties = Maps.newHashMap();
+        this.properties = Maps.newHashMap();
+        if (properties != null) {
+            this.properties.putAll(properties);
         }
         if (isMultiLoadBroker()) {
             this.storageType = StorageBackend.StorageType.LOCAL;
         } else {
             this.storageType = StorageBackend.StorageType.BROKER;
         }
-        tryConvertToS3();
+        this.properties.putAll(S3ClientBEProperties.getBeFSProperties(this.properties));
+        this.convertedToS3 = BosProperties.tryConvertBosToS3(this.properties, this.storageType);
+        if (this.convertedToS3) {
+            this.storageType = StorageBackend.StorageType.S3;
+        }
     }
 
     public BrokerDesc(String name, StorageBackend.StorageType storageType, Map<String, String> properties) {
         this.name = name;
-        this.properties = properties;
-        if (this.properties == null) {
-            this.properties = Maps.newHashMap();
+        this.properties = Maps.newHashMap();
+        if (properties != null) {
+            this.properties.putAll(properties);
         }
         this.storageType = storageType;
-        tryConvertToS3();
+        this.properties.putAll(S3ClientBEProperties.getBeFSProperties(this.properties));
+        this.convertedToS3 = BosProperties.tryConvertBosToS3(this.properties, this.storageType);
+        if (this.convertedToS3) {
+            this.storageType = StorageBackend.StorageType.S3;
+        }
+    }
+
+    public String getFileLocation(String location) {
+        return this.convertedToS3 ? BosProperties.convertPathToS3(location) : location;
     }
 
     public static BrokerDesc createForStreamLoad() {
-        BrokerDesc brokerDesc = new BrokerDesc("", StorageType.STREAM, null);
-        return brokerDesc;
-    }
-
-    public String getName() {
-        return name;
-    }
-
-    public Map<String, String> getProperties() {
-        return properties;
-    }
-
-    public StorageBackend.StorageType getStorageType() {
-        return storageType;
+        return new BrokerDesc("", StorageType.STREAM, null);
     }
 
     public boolean isMultiLoadBroker() {
@@ -117,6 +124,8 @@ public class BrokerDesc extends StorageDesc implements Writable {
             case STREAM:
                 return TFileType.FILE_STREAM;
             case BROKER:
+            case OFS:
+            case JFS:
             default:
                 return TFileType.FILE_BROKER;
         }
@@ -128,13 +137,8 @@ public class BrokerDesc extends StorageDesc implements Writable {
 
     @Override
     public void write(DataOutput out) throws IOException {
-        Text.writeString(out, name);
-        properties.put(BlobStorage.STORAGE_TYPE, storageType.name());
-        out.writeInt(properties.size());
-        for (Map.Entry<String, String> entry : properties.entrySet()) {
-            Text.writeString(out, entry.getKey());
-            Text.writeString(out, entry.getValue());
-        }
+        String json = GsonUtils.GSON.toJson(this);
+        Text.writeString(out, json);
     }
 
     public void readFields(DataInput in) throws IOException {
@@ -147,7 +151,7 @@ public class BrokerDesc extends StorageDesc implements Writable {
             properties.put(key, val);
         }
         StorageBackend.StorageType st = StorageBackend.StorageType.BROKER;
-        String typeStr = properties.remove(BlobStorage.STORAGE_TYPE);
+        String typeStr = properties.remove(PersistentFileSystem.STORAGE_TYPE);
         if (typeStr != null) {
             try {
                 st = StorageBackend.StorageType.valueOf(typeStr);
@@ -159,6 +163,9 @@ public class BrokerDesc extends StorageDesc implements Writable {
     }
 
     public static BrokerDesc read(DataInput in) throws IOException {
+        if (Env.getCurrentEnvJournalVersion() >= FeMetaVersion.VERSION_136) {
+            return GsonUtils.GSON.fromJson(Text.readString(in), BrokerDesc.class);
+        }
         BrokerDesc desc = new BrokerDesc();
         desc.readFields(in);
         return desc;

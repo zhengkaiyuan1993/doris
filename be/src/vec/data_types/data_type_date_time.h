@@ -20,13 +20,32 @@
 
 #pragma once
 
-#include "vec/data_types/data_type_date.h"
-#include "vec/data_types/data_type_number_base.h"
-#include "vec/data_types/data_type_time_v2.h"
+#include <gen_cpp/Types_types.h>
+#include <stddef.h>
 
-class DateLUTImpl;
+#include <algorithm>
+#include <boost/iterator/iterator_facade.hpp>
+#include <string>
+
+#include "common/status.h"
+#include "runtime/define_primitive_type.h"
+#include "vec/core/types.h"
+#include "vec/data_types/data_type.h"
+#include "vec/data_types/data_type_number_base.h"
+#include "vec/data_types/serde/data_type_date64_serde.h"
+
+namespace doris {
+namespace vectorized {
+class BufferWritable;
+class ReadBuffer;
+class IColumn;
+class DataTypeDate;
+class DataTypeDateV2;
+} // namespace vectorized
+} // namespace doris
 
 namespace doris::vectorized {
+#include "common/compile_check_begin.h"
 
 /** DateTime stores time as unix timestamp.
 	* The value itself is independent of time zone.
@@ -50,20 +69,47 @@ namespace doris::vectorized {
 	*/
 class DataTypeDateTime final : public DataTypeNumberBase<Int64> {
 public:
-    DataTypeDateTime();
+    DataTypeDateTime() = default;
 
     const char* get_family_name() const override { return "DateTime"; }
     std::string do_get_name() const override { return "DateTime"; }
     TypeIndex get_type_id() const override { return TypeIndex::DateTime; }
+    TypeDescriptor get_type_as_type_descriptor() const override {
+        return TypeDescriptor(TYPE_DATETIME);
+    }
 
-    bool can_be_used_as_version() const override { return true; }
-    bool can_be_inside_nullable() const override { return true; }
+    doris::FieldType get_storage_field_type() const override {
+        return doris::FieldType::OLAP_FIELD_TYPE_DATETIME;
+    }
 
     bool equals(const IDataType& rhs) const override;
 
     std::string to_string(const IColumn& column, size_t row_num) const override;
+    std::string to_string(Int64 value) const;
+
+    DataTypeSerDeSPtr get_serde(int nesting_level = 1) const override {
+        return std::make_shared<DataTypeDateTimeSerDe>(nesting_level);
+    }
+
+    Field get_field(const TExprNode& node) const override {
+        VecDateTimeValue value;
+        if (value.from_date_str(node.date_literal.value.c_str(), node.date_literal.value.size())) {
+            value.to_datetime();
+            return Int64(*reinterpret_cast<__int64_t*>(&value));
+        } else {
+            throw doris::Exception(doris::ErrorCode::INVALID_ARGUMENT,
+                                   "Invalid value: {} for type DateTime", node.date_literal.value);
+        }
+    }
 
     void to_string(const IColumn& column, size_t row_num, BufferWritable& ostr) const override;
+    void to_string_batch(const IColumn& column, ColumnString& column_to) const final {
+        DataTypeNumberBase<Int64>::template to_string_batch_impl<DataTypeDateTime>(column,
+                                                                                   column_to);
+    }
+
+    size_t number_length() const;
+    void push_number(ColumnString::Chars& chars, const Int64& num) const;
 
     Status from_string(ReadBuffer& rb, IColumn* column) const override;
 
@@ -98,4 +144,5 @@ constexpr bool IsTimeType = IsDateTimeType<DataType> || IsDateType<DataType>;
 template <typename DataType>
 constexpr bool IsTimeV2Type = IsDateTimeV2Type<DataType> || IsDateV2Type<DataType>;
 
+#include "common/compile_check_end.h"
 } // namespace doris::vectorized

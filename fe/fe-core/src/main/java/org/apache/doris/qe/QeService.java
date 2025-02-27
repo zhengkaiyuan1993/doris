@@ -17,7 +17,9 @@
 
 package org.apache.doris.qe;
 
-import org.apache.doris.mysql.nio.NMysqlServer;
+import org.apache.doris.mysql.MysqlServer;
+import org.apache.doris.qe.help.HelpModule;
+import org.apache.doris.service.arrowflight.DorisFlightSqlService;
 
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
@@ -31,30 +33,44 @@ public class QeService {
 
     private int port;
     // MySQL protocol service
-    private NMysqlServer mysqlServer;
+    private MysqlServer mysqlServer;
+
+    private int arrowFlightSQLPort;
+    private DorisFlightSqlService dorisFlightSqlService;
 
     @Deprecated
-    public QeService(int port) {
+    public QeService(int port, int arrowFlightSQLPort) {
         this.port = port;
+        this.arrowFlightSQLPort = arrowFlightSQLPort;
     }
 
-    public QeService(int port, ConnectScheduler scheduler) {
+    public QeService(int port, int arrowFlightSQLPort, ConnectScheduler scheduler) {
         this.port = port;
-        this.mysqlServer = new NMysqlServer(port, scheduler);
+        this.arrowFlightSQLPort = arrowFlightSQLPort;
+        this.mysqlServer = new MysqlServer(port, scheduler);
     }
 
     public void start() throws Exception {
         // Set up help module
         try {
-            HelpModule.getInstance().setUpModule();
+            HelpModule.getInstance().setUpModule(HelpModule.HELP_ZIP_FILE_NAME);
         } catch (Exception e) {
-            LOG.warn("Help module failed, because:", e);
-            throw e;
+            LOG.warn("Help module failed. ignore it.", e);
+            // TODO: ignore the help module failure temporarily.
+            // We should fix it in the future.
         }
 
         if (!mysqlServer.start()) {
             LOG.error("mysql server start failed");
             System.exit(-1);
+        }
+        if (arrowFlightSQLPort != -1) {
+            this.dorisFlightSqlService = new DorisFlightSqlService(arrowFlightSQLPort);
+            if (!dorisFlightSqlService.start()) {
+                System.exit(-1);
+            }
+        } else {
+            LOG.info("No Arrow Flight SQL service that needs to be started.");
         }
         LOG.info("QE service start.");
     }

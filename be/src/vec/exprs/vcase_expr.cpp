@@ -17,10 +17,29 @@
 
 #include "vec/exprs/vcase_expr.h"
 
+#include <gen_cpp/Exprs_types.h>
+#include <gen_cpp/Types_types.h>
+
+#include <ostream>
+
 #include "common/status.h"
-#include "vec/columns/column_nullable.h"
+#include "runtime/runtime_state.h"
+#include "vec/aggregate_functions/aggregate_function.h"
+#include "vec/columns/column.h"
+#include "vec/core/block.h"
+#include "vec/core/column_numbers.h"
+#include "vec/core/column_with_type_and_name.h"
+#include "vec/core/columns_with_type_and_name.h"
+#include "vec/exprs/vexpr_context.h"
+#include "vec/functions/simple_function_factory.h"
+
+namespace doris {
+class RowDescriptor;
+class RuntimeState;
+} // namespace doris
 
 namespace doris::vectorized {
+#include "common/compile_check_begin.h"
 
 VCaseExpr::VCaseExpr(const TExprNode& node)
         : VExpr(node),
@@ -34,69 +53,63 @@ VCaseExpr::VCaseExpr(const TExprNode& node)
     }
 }
 
-Status VCaseExpr::prepare(doris::RuntimeState* state, const doris::RowDescriptor& desc,
-                          VExprContext* context) {
+Status VCaseExpr::prepare(RuntimeState* state, const RowDescriptor& desc, VExprContext* context) {
     RETURN_IF_ERROR_OR_PREPARED(VExpr::prepare(state, desc, context));
 
     ColumnsWithTypeAndName argument_template;
     DataTypes arguments;
-    for (int i = 0; i < _children.size(); i++) {
-        auto child = _children[i];
-        const auto& child_name = child->expr_name();
-        auto child_column = child->data_type()->create_column();
-        argument_template.emplace_back(std::move(child_column), child->data_type(), child_name);
+    for (auto child : _children) {
+        argument_template.emplace_back(nullptr, child->data_type(), child->expr_name());
         arguments.emplace_back(child->data_type());
     }
 
-    _function = SimpleFunctionFactory::instance().get_function(_function_name, argument_template,
-                                                               _data_type);
+    _function = SimpleFunctionFactory::instance().get_function(
+            _function_name, argument_template, _data_type,
+            {.enable_decimal256 = state->enable_decimal256()});
     if (_function == nullptr) {
         return Status::NotSupported("vcase_expr Function {} is not implemented",
                                     _fn.name.function_name);
     }
 
     VExpr::register_function_context(state, context);
+    _prepare_finished = true;
     return Status::OK();
 }
 
 Status VCaseExpr::open(RuntimeState* state, VExprContext* context,
                        FunctionContext::FunctionStateScope scope) {
-    RETURN_IF_ERROR(VExpr::open(state, context, scope));
-    RETURN_IF_ERROR(VExpr::init_function_context(context, scope, _function));
-    if (scope == doris_udf::FunctionContext::FRAGMENT_LOCAL) {
-        auto* case_state = new CaseState {_data_type};
-        context->fn_context(_fn_context_index)
-                ->set_function_state(FunctionContext::FRAGMENT_LOCAL, case_state);
+    DCHECK(_prepare_finished);
+    for (auto& i : _children) {
+        RETURN_IF_ERROR(i->open(state, context, scope));
     }
+    RETURN_IF_ERROR(VExpr::init_function_context(state, context, scope, _function));
+    if (scope == FunctionContext::FRAGMENT_LOCAL) {
+        RETURN_IF_ERROR(VExpr::get_const_col(context, nullptr));
+    }
+    _open_finished = true;
     return Status::OK();
 }
 
-void VCaseExpr::close(RuntimeState* state, VExprContext* context,
-                      FunctionContext::FunctionStateScope scope) {
-    if (scope == doris_udf::FunctionContext::FRAGMENT_LOCAL) {
-        auto* case_state = reinterpret_cast<CaseState*>(
-                context->fn_context(_fn_context_index)
-                        ->get_function_state(FunctionContext::FRAGMENT_LOCAL));
-        delete case_state;
-    }
-
+void VCaseExpr::close(VExprContext* context, FunctionContext::FunctionStateScope scope) {
+    DCHECK(_prepare_finished);
     VExpr::close_function_context(context, scope, _function);
-    VExpr::close(state, context, scope);
+    VExpr::close(context, scope);
 }
 
 Status VCaseExpr::execute(VExprContext* context, Block* block, int* result_column_id) {
+    if (is_const_and_have_executed()) { // const have execute in open function
+        return get_result_from_const(block, _expr_name, result_column_id);
+    }
+    DCHECK(_open_finished || _getting_const_col);
     ColumnNumbers arguments(_children.size());
-
     for (int i = 0; i < _children.size(); i++) {
         int column_id = -1;
         RETURN_IF_ERROR(_children[i]->execute(context, block, &column_id));
         arguments[i] = column_id;
-
-        block->replace_by_position_if_const(column_id);
-        auto child_column = block->get_by_position(column_id).column;
     }
+    RETURN_IF_ERROR(check_constant(*block, arguments));
 
-    size_t num_columns_without_result = block->columns();
+    uint32_t num_columns_without_result = block->columns();
     block->insert({nullptr, _data_type, _expr_name});
 
     RETURN_IF_ERROR(_function->execute(context->fn_context(_fn_context_index), *block, arguments,
@@ -115,7 +128,7 @@ std::string VCaseExpr::debug_string() const {
     out << "CaseExpr(has_case_expr=" << _has_case_expr << " has_else_expr=" << _has_else_expr
         << " function=" << _function_name << "){";
     bool first = true;
-    for (VExpr* input_expr : children()) {
+    for (const auto& input_expr : children()) {
         if (first) {
             first = false;
         } else {
@@ -126,4 +139,6 @@ std::string VCaseExpr::debug_string() const {
     out << "}";
     return out.str();
 }
+
+#include "common/compile_check_end.h"
 } // namespace doris::vectorized

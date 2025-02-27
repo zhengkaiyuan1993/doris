@@ -186,4 +186,45 @@ suite("test_outfile") {
             path.delete();
         }
     }
+
+    // test parallel output
+    try {
+        File path = new File(outFilePath)
+        if (!path.exists()) {
+            assert path.mkdirs()
+        } else {
+            throw new IllegalStateException("""${outFilePath} already exists! """)
+        }
+        sql """drop table if exists select_into_file"""
+        sql """CREATE TABLE `select_into_file` (
+                    `id` int,
+                     `name` varchar(30)
+                 ) ENGINE=OLAP
+                   DUPLICATE KEY(`id`)
+                   DISTRIBUTED BY HASH(`id`) BUCKETS 16
+                   PROPERTIES (
+                   "replication_allocation" = "tag.location.default: 1"
+                   );"""
+        sql """insert into select_into_file values(1, "b"),(2, "z"),(3, "a"),
+                    (4, "c"), (5, "睿"), (6, "多"), (7, "丝"), (8, "test"),
+                    (100, "aa"), (111, "bb"), (123, "cc"), (222, "dd"),(1, "b"),(2, "z"),(3, "a"),
+                    (44, "c"), (55, "睿"), (66, "多"), (77, "丝"), (88, "test"),
+                    (1000, "aa"), (1111, "bb"), (1234, "cc"), (2222, "dd");"""
+        sql "set enable_parallel_outfile = true;"
+        sql "set parallel_pipeline_task_num=4;"
+        def result = sql """select * from select_into_file into outfile "file://${outFilePath}/";"""
+        assertEquals(4, result.size())
+        sql "set parallel_pipeline_task_num=8;"
+        result = sql """select * from select_into_file into outfile "file://${outFilePath}/" properties("success_file_name" = "SUCCESS");"""
+        assertEquals(8, result.size())
+    } finally {
+        try_sql("DROP TABLE IF EXISTS select_into_file")
+        File path = new File(outFilePath)
+        if (path.exists()) {
+            for (File f: path.listFiles()) {
+                f.delete();
+            }
+            path.delete();
+        }
+    }
 }

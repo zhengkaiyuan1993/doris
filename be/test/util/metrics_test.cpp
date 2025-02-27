@@ -17,12 +17,14 @@
 
 #include "util/metrics.h"
 
-#include <gtest/gtest.h>
+#include <glog/logging.h>
+#include <gtest/gtest-message.h>
+#include <gtest/gtest-test-part.h>
+#include <unistd.h>
 
-#include <iostream>
 #include <thread>
 
-#include "common/config.h"
+#include "gtest/gtest_pred_impl.h"
 #include "testutil/test_util.h"
 #include "util/stopwatch.hpp"
 
@@ -44,7 +46,7 @@ TEST_F(MetricsTest, Counter) {
         EXPECT_STREQ("100", counter.to_string().c_str());
     }
     {
-        IntAtomicCounter counter;
+        IntCounter counter;
         EXPECT_EQ(0, counter.value());
         counter.increment(100);
         EXPECT_EQ(100, counter.value());
@@ -97,7 +99,7 @@ TEST_F(MetricsTest, CounterPerf) {
     }
     // IntAtomicCounter
     {
-        IntAtomicCounter counter;
+        IntCounter counter;
         MonotonicStopWatch watch;
         watch.start();
         for (int i = 0; i < kLoopCount; ++i) {
@@ -139,11 +141,11 @@ TEST_F(MetricsTest, CounterPerf) {
     }
     // multi-thread for IntAtomicCounter
     {
-        IntAtomicCounter mt_counter;
+        IntCounter mt_counter;
         std::vector<std::thread> updaters;
         std::atomic<uint64_t> used_time(0);
         for (int i = 0; i < 8; ++i) {
-            updaters.emplace_back(&mt_updater<IntAtomicCounter>, kThreadLoopCount, &mt_counter,
+            updaters.emplace_back(&mt_updater<IntCounter>, kThreadLoopCount, &mt_counter,
                                   &used_time);
         }
         for (int i = 0; i < 8; ++i) {
@@ -448,7 +450,7 @@ test_registry_task_duration_standard_deviation 28.8661
     }
 
     {
-        // Register one histogram metric with lables to the entity
+        // Register one histogram metric with labels to the entity
         auto entity = registry.register_entity("test_entity", {{"instance", "test"}});
 
         MetricPrototype task_duration_type(MetricType::HISTOGRAM, MetricUnit::MILLISECONDS,

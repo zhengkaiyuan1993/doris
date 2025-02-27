@@ -25,7 +25,8 @@ suite("load_one_step") {
         |"AWS_ACCESS_KEY" = "${getS3AK()}",
         |"AWS_SECRET_KEY" = "${getS3SK()}",
         |"AWS_ENDPOINT" = "${getS3Endpoint()}",
-        |"AWS_REGION" = "${getS3Region()}")
+        |"AWS_REGION" = "${getS3Region()}",
+        |"provider" = "${getS3Provider()}")
         |PROPERTIES(
         |"exec_mem_limit" = "8589934592",
         |"load_parallelism" = "3")""".stripMargin()
@@ -46,6 +47,7 @@ suite("load_one_step") {
         // check load state
         while (true) {
             def stateResult = sql "show load where Label = '${loadLabel}'"
+            logger.info("load result is ${stateResult}")
             def loadState = stateResult[stateResult.size() - 1][2].toString()
             if ("CANCELLED".equalsIgnoreCase(loadState)) {
                 throw new IllegalStateException("load ${loadLabel} failed.")
@@ -55,6 +57,11 @@ suite("load_one_step") {
                     def loadRowCount = sql "select count(1) from ${table}"
                     logger.info("select ${table} numbers: ${loadRowCount[0][0]}".toString())
                     assertTrue(loadRowCount[0][0] == rows)
+                }
+                if (table == "lineitem") {
+                    def loadRowCount = sql "select count(1) from ${table} where l_orderkey = 1"
+                    logger.info("select ${table} numbers: ${loadRowCount[0][0]}".toString())
+                    assertTrue(loadRowCount[0][0] == 6)
                 }
                 sql new File("""${context.file.parentFile.parent}/ddl/${table}_delete.sql""").text
                 for (int i = 1; i <= 5; i++) {
@@ -66,5 +73,11 @@ suite("load_one_step") {
             }
             sleep(5000)
         }
+    }
+
+    Thread.sleep(70000) // wait for row count report of the tables just loaded
+    tables.each { table, rows ->
+        sql """SET query_timeout = 1800"""
+        sql """ ANALYZE TABLE $table WITH SYNC """
     }
 }

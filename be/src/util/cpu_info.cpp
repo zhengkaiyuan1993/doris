@@ -21,8 +21,6 @@
 #include "util/cpu_info.h"
 
 #if defined(__GNUC__) && (defined(__x86_64__) || defined(__i386__))
-/* GCC-compatible compiler, targeting x86/x86-64 */
-#include <x86intrin.h>
 #elif defined(__GNUC__) && defined(__ARM_NEON__)
 /* GCC-compatible compiler, targeting ARM with NEON */
 #include <arm_neon.h>
@@ -43,24 +41,26 @@
 #include <sys/sysctl.h>
 #endif
 
+#include <gen_cpp/Metrics_types.h>
 #include <sched.h>
 #include <stdlib.h>
-#include <string.h>
 #include <unistd.h>
 
 #include <algorithm>
-#include <boost/algorithm/string.hpp>
+#include <boost/algorithm/string/predicate.hpp>
+#include <boost/algorithm/string/trim.hpp>
+// IWYU pragma: no_include <bits/chrono.h>
+#include <chrono> // IWYU pragma: keep
 #include <filesystem>
 #include <fstream>
-#include <iostream>
-#include <sstream>
 
 #include "common/config.h"
 #include "common/env_config.h"
 #include "gflags/gflags.h"
+#include "gutil/stringprintf.h"
 #include "gutil/strings/substitute.h"
+#include "util/cgroup_util.h"
 #include "util/pretty_printer.h"
-#include "util/string_parser.hpp"
 
 using boost::algorithm::contains;
 using boost::algorithm::trim;
@@ -109,7 +109,6 @@ static struct {
         {"ssse3", CpuInfo::SSSE3},   {"sse4_1", CpuInfo::SSE4_1}, {"sse4_2", CpuInfo::SSE4_2},
         {"popcnt", CpuInfo::POPCNT}, {"avx", CpuInfo::AVX},       {"avx2", CpuInfo::AVX2},
 };
-static const long num_flags = sizeof(flag_mappings) / sizeof(flag_mappings[0]);
 
 // Helper function to parse for hardware flags.
 // values contains a list of space-separated flags.  check to see if the flags we
@@ -117,9 +116,9 @@ static const long num_flags = sizeof(flag_mappings) / sizeof(flag_mappings[0]);
 // Returns a bitmap of flags.
 int64_t ParseCPUFlags(const string& values) {
     int64_t flags = 0;
-    for (int i = 0; i < num_flags; ++i) {
-        if (contains(values, flag_mappings[i].name)) {
-            flags |= flag_mappings[i].flag;
+    for (auto& flag_mapping : flag_mappings) {
+        if (contains(values, flag_mapping.name)) {
+            flags |= flag_mapping.flag;
         }
     }
     return flags;
@@ -132,8 +131,9 @@ void CpuInfo::init() {
     string value;
 
     float max_mhz = 0;
-    int num_cores = 0;
+    int physical_num_cores = 0;
 
+    // maybe use std::thread::hardware_concurrency()?
     // Read from /proc/cpuinfo
     std::ifstream cpuinfo("/proc/cpuinfo");
     while (cpuinfo) {
@@ -144,25 +144,26 @@ void CpuInfo::init() {
             value = line.substr(colon + 1, string::npos);
             trim(name);
             trim(value);
-            if (name.compare("flags") == 0) {
+            if (name == "flags") {
                 hardware_flags_ |= ParseCPUFlags(value);
-            } else if (name.compare("cpu MHz") == 0) {
+            } else if (name == "cpu MHz") {
                 // Every core will report a different speed.  We'll take the max, assuming
                 // that when impala is running, the core will not be in a lower power state.
                 // TODO: is there a more robust way to do this, such as
                 // Window's QueryPerformanceFrequency()
                 float mhz = atof(value.c_str());
                 max_mhz = max(mhz, max_mhz);
-            } else if (name.compare("processor") == 0) {
-                ++num_cores;
-            } else if (name.compare("model name") == 0) {
+            } else if (name == "processor") {
+                ++physical_num_cores;
+            } else if (name == "model name") {
                 model_name_ = value;
             }
         }
     }
 
+    int num_cores = CGroupUtil::get_cgroup_limited_cpu_number(physical_num_cores);
     if (max_mhz != 0) {
-        cycles_per_ms_ = max_mhz * 1000;
+        cycles_per_ms_ = int64_t(max_mhz) * 1000;
     } else {
         cycles_per_ms_ = 1000000;
     }
@@ -173,7 +174,9 @@ void CpuInfo::init() {
     } else {
         num_cores_ = 1;
     }
-    if (config::num_cores > 0) num_cores_ = config::num_cores;
+    if (config::num_cores > 0) {
+        num_cores_ = config::num_cores;
+    }
 
 #ifdef __APPLE__
     size_t len = sizeof(max_num_cores_);
@@ -395,9 +398,9 @@ std::string CpuInfo::debug_string() {
            << "  " << L2 << std::endl
            << "  " << L3 << std::endl
            << "  Hardware Supports:" << std::endl;
-    for (int i = 0; i < num_flags; ++i) {
-        if (is_supported(flag_mappings[i].flag)) {
-            stream << "    " << flag_mappings[i].name << std::endl;
+    for (auto& flag_mapping : flag_mappings) {
+        if (is_supported(flag_mapping.flag)) {
+            stream << "    " << flag_mapping.name << std::endl;
         }
     }
     stream << "  Numa Nodes: " << max_num_numa_nodes_ << std::endl;

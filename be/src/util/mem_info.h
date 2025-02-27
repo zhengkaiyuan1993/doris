@@ -20,19 +20,29 @@
 
 #pragma once
 
-#include <gperftools/malloc_extension.h>
-
+#include <atomic>
+#include <cstddef>
+#include <cstdint>
 #include <string>
 
+#if !defined(__APPLE__) || !defined(_POSIX_C_SOURCE)
+#include <unistd.h>
+#else
+#include <mach/vm_page_size.h>
+#endif
+
+#include "common/config.h"
 #include "common/logging.h"
 #include "util/perf_counters.h"
 #include "util/pretty_printer.h"
 
 namespace doris {
 
-// Provides the amount of physical memory available.
-// Populated from /proc/meminfo.
-// TODO: Combine mem-info, cpu-info and disk-info into hardware-info/perf_counters ?
+// Provides the amount of physical memory available and memory limit.
+// Populated from /proc/meminfo and other system attributes.
+// Note: The memory values ​​in MemInfo are original values,
+// usually you should use the memory values ​​in GlobalMemoryArbitrator,
+// which are corrected values ​​that better meet your needs.
 class MemInfo {
 public:
     // Initialize MemInfo.
@@ -40,70 +50,87 @@ public:
 
     static inline bool initialized() { return _s_initialized; }
 
+    static int get_page_size() {
+#if !defined(__APPLE__) || !defined(_POSIX_C_SOURCE)
+        return getpagesize();
+#else
+        return vm_page_size;
+#endif
+    }
+
     // Get total physical memory in bytes (if has cgroups memory limits, return the limits).
     static inline int64_t physical_mem() {
         DCHECK(_s_initialized);
-        return _s_physical_mem;
+        return _s_physical_mem.load(std::memory_order_relaxed);
     }
 
-    static inline size_t current_mem() { return _s_allocator_physical_mem; }
-    static inline size_t allocator_virtual_mem() { return _s_virtual_memory_used; }
-    static inline size_t allocator_cache_mem() { return _s_allocator_cache_mem; }
-    static inline std::string allocator_cache_mem_str() { return _s_allocator_cache_mem_str; }
-    static inline int64_t proc_mem_no_allocator_cache() { return _s_proc_mem_no_allocator_cache; }
+    static void refresh_proc_meminfo();
 
-    // Tcmalloc property `generic.total_physical_bytes` records the total length of the virtual memory
-    // obtained by the process malloc, not the physical memory actually used by the process in the OS.
-    static inline void refresh_allocator_mem() {
-        MallocExtension::instance()->GetNumericProperty("generic.total_physical_bytes",
-                                                        &_s_allocator_physical_mem);
-        MallocExtension::instance()->GetNumericProperty("tcmalloc.pageheap_unmapped_bytes",
-                                                        &_s_pageheap_unmapped_bytes);
-        MallocExtension::instance()->GetNumericProperty("tcmalloc.pageheap_free_bytes",
-                                                        &_s_tcmalloc_pageheap_free_bytes);
-        MallocExtension::instance()->GetNumericProperty("tcmalloc.central_cache_free_bytes",
-                                                        &_s_tcmalloc_central_bytes);
-        MallocExtension::instance()->GetNumericProperty("tcmalloc.transfer_cache_free_bytes",
-                                                        &_s_tcmalloc_transfer_bytes);
-        MallocExtension::instance()->GetNumericProperty("tcmalloc.thread_cache_free_bytes",
-                                                        &_s_tcmalloc_thread_bytes);
-        _s_allocator_cache_mem = _s_tcmalloc_pageheap_free_bytes + _s_tcmalloc_central_bytes +
-                                 _s_tcmalloc_transfer_bytes + _s_tcmalloc_thread_bytes;
-        _s_allocator_cache_mem_str =
-                PrettyPrinter::print(static_cast<uint64_t>(_s_allocator_cache_mem), TUnit::BYTES);
-        _s_virtual_memory_used = _s_allocator_physical_mem + _s_pageheap_unmapped_bytes;
-        _s_proc_mem_no_allocator_cache =
-                PerfCounters::get_vm_rss() - static_cast<int64_t>(_s_allocator_cache_mem);
+    static inline int64_t sys_mem_available_low_water_mark() {
+        return _s_sys_mem_available_low_water_mark;
+    }
+    static inline int64_t sys_mem_available_warning_water_mark() {
+        return _s_sys_mem_available_warning_water_mark;
+    }
+    static inline int64_t process_minor_gc_size() {
+        return _s_process_minor_gc_size.load(std::memory_order_relaxed);
+    }
+    static inline int64_t process_full_gc_size() {
+        return _s_process_full_gc_size.load(std::memory_order_relaxed);
     }
 
     static inline int64_t mem_limit() {
         DCHECK(_s_initialized);
-        return _s_mem_limit;
+        return _s_mem_limit.load(std::memory_order_relaxed);
     }
     static inline std::string mem_limit_str() {
         DCHECK(_s_initialized);
-        return _s_mem_limit_str;
+        return PrettyPrinter::print(_s_mem_limit.load(std::memory_order_relaxed), TUnit::BYTES);
     }
-    static inline int64_t hard_mem_limit() { return _s_hard_mem_limit; }
+    static inline int64_t soft_mem_limit() {
+        DCHECK(_s_initialized);
+        return _s_soft_mem_limit.load(std::memory_order_relaxed);
+    }
+    static inline std::string soft_mem_limit_str() {
+        DCHECK(_s_initialized);
+        return PrettyPrinter::print(_s_soft_mem_limit.load(std::memory_order_relaxed),
+                                    TUnit::BYTES);
+    }
+    static inline int64_t cgroup_mem_limit() {
+        DCHECK(_s_initialized);
+        return _s_cgroup_mem_limit.load(std::memory_order_relaxed);
+    }
+    static inline int64_t cgroup_mem_usage() {
+        DCHECK(_s_initialized);
+        return _s_cgroup_mem_usage.load(std::memory_order_relaxed);
+    }
+    static inline int64_t cgroup_mem_refresh_state() {
+        DCHECK(_s_initialized);
+        return _s_cgroup_mem_refresh_state.load(std::memory_order_relaxed);
+    }
 
     static std::string debug_string();
 
 private:
+    friend class GlobalMemoryArbitrator;
+
     static bool _s_initialized;
-    static int64_t _s_physical_mem;
-    static int64_t _s_mem_limit;
-    static std::string _s_mem_limit_str;
-    static int64_t _s_hard_mem_limit;
-    static size_t _s_allocator_physical_mem;
-    static size_t _s_pageheap_unmapped_bytes;
-    static size_t _s_tcmalloc_pageheap_free_bytes;
-    static size_t _s_tcmalloc_central_bytes;
-    static size_t _s_tcmalloc_transfer_bytes;
-    static size_t _s_tcmalloc_thread_bytes;
-    static size_t _s_allocator_cache_mem;
-    static std::string _s_allocator_cache_mem_str;
-    static size_t _s_virtual_memory_used;
-    static int64_t _s_proc_mem_no_allocator_cache;
+    static std::atomic<int64_t> _s_physical_mem;
+    static std::atomic<int64_t> _s_mem_limit;
+    static std::atomic<int64_t> _s_soft_mem_limit;
+
+    static std::atomic<int64_t> _s_cgroup_mem_limit;
+    static std::atomic<int64_t> _s_cgroup_mem_usage;
+    static std::atomic<bool> _s_cgroup_mem_refresh_state;
+    static int64_t _s_cgroup_mem_refresh_wait_times;
+
+    // If you need use system available memory size, use GlobalMemoryArbitrator::sys_mem_available(),
+    // this value in MemInfo is the original value.
+    static std::atomic<int64_t> _s_sys_mem_available;
+    static int64_t _s_sys_mem_available_low_water_mark;
+    static int64_t _s_sys_mem_available_warning_water_mark;
+    static std::atomic<int64_t> _s_process_minor_gc_size;
+    static std::atomic<int64_t> _s_process_full_gc_size;
 };
 
 } // namespace doris

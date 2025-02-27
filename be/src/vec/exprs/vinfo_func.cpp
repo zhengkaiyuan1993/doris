@@ -17,13 +17,22 @@
 
 #include "vec/exprs/vinfo_func.h"
 
-#include <fmt/format.h>
+#include <gen_cpp/Exprs_types.h>
+#include <glog/logging.h>
 
-#include "util/string_parser.hpp"
+#include <algorithm>
+
+#include "runtime/define_primitive_type.h"
+#include "runtime/types.h"
+#include "vec/core/block.h"
 #include "vec/core/field.h"
-#include "vec/data_types/data_type_nullable.h"
+#include "vec/core/types.h"
+#include "vec/data_types/data_type.h"
 
 namespace doris::vectorized {
+#include "common/compile_check_begin.h"
+
+class VExprContext;
 
 VInfoFunc::VInfoFunc(const TExprNode& node) : VExpr(node) {
     Field field;
@@ -48,9 +57,10 @@ VInfoFunc::VInfoFunc(const TExprNode& node) : VExpr(node) {
 
 Status VInfoFunc::execute(VExprContext* context, vectorized::Block* block, int* result_column_id) {
     // Info function should return least one row, e.g. select current_user().
-    size_t row_size = std::max(block->rows(), size_t(1));
+    size_t row_size = std::max(block->rows(), 1UL);
     *result_column_id = VExpr::insert_param(block, {_column_ptr, _data_type, _expr_name}, row_size);
     return Status::OK();
 }
 
+#include "common/compile_check_end.h"
 } // namespace doris::vectorized

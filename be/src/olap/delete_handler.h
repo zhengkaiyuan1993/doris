@@ -17,23 +17,24 @@
 
 #pragma once
 
-#include <string>
-#include <vector>
+#include <butil/macros.h>
 
-#include "gen_cpp/AgentService_types.h"
-#include "gen_cpp/olap_file.pb.h"
-#include "olap/block_column_predicate.h"
-#include "olap/column_predicate.h"
-#include "olap/olap_define.h"
+#include <cstdint>
+#include <string>
+#include <type_traits>
+
+#include "common/factory_creator.h"
+#include "common/status.h"
 #include "olap/rowset/rowset_meta.h"
 #include "olap/tablet_schema.h"
+#include "vec/common/arena.h"
 
 namespace doris {
 
-class RowCursor;
-class Tablet;
-class TabletReader;
-class TabletSchema;
+class AndBlockColumnPredicate;
+class ColumnPredicate;
+class DeletePredicatePB;
+class TCondition;
 
 // Represent a delete condition.
 struct DeleteConditions {
@@ -53,6 +54,7 @@ struct DeleteConditions {
 // NOTE：
 //    * In the first step, before calling delete_handler.init(), you should lock the tablet's header file.
 class DeleteHandler {
+    ENABLE_FACTORY_CREATOR(DeleteHandler);
     // These static method is used to generate delete predicate pb during write or push handler
 public:
     // generated DeletePredicatePB by TCondition
@@ -60,8 +62,16 @@ public:
                                             const std::vector<TCondition>& conditions,
                                             DeletePredicatePB* del_pred);
 
-    // construct sub condition from TCondition
-    static std::string construct_sub_predicates(const TCondition& condition);
+    static Status convert_to_sub_pred_v2(DeletePredicatePB* delete_pred, TabletSchemaSPtr schema);
+
+    /**
+     * Use regular expression to extract 'column_name', 'op' and 'operands'
+     *
+     * @param condition_str input predicate string in form of `X OP Y`
+     * @param condition output param
+     * @return OK if matched and extracted correctly otherwise DELETE_INVALID_PARAMETERS
+     */
+    static Status parse_condition(const std::string& condition_str, TCondition* condition);
 
 private:
     // Validate the condition on the schema.
@@ -76,41 +86,47 @@ private:
                                          const std::string& condition_op,
                                          const std::string& value_str);
 
+    // extract 'column_name', 'op' and 'operands' to condition
+    static Status parse_condition(const DeleteSubPredicatePB& sub_cond, TCondition* condition);
+
 public:
     DeleteHandler() = default;
-    ~DeleteHandler() { finalize(); }
+    ~DeleteHandler();
 
     // Initialize DeleteHandler, use the delete conditions of this tablet whose version less than or equal to
     // 'version' to fill '_del_conds'.
     // NOTE: You should lock the tablet's header file before calling this function.
-    //
     // input:
     //     * schema: tablet's schema, the delete conditions and data rows are in this schema
     //     * version: maximum version
+    //     * with_sub_pred_v2: whether to use delete sub predicate v2 (v2 is based on PB and use column uid to specify a column,
+    //         v1 is based on condition string, and relies on regex for parse)
     // return:
-    //     * Status::OLAPInternalError(OLAP_ERR_DELETE_INVALID_PARAMETERS): input parameters are not valid
-    //     * Status::OLAPInternalError(OLAP_ERR_MALLOC_ERROR): alloc memory failed
+    //     * Status::Error<DELETE_INVALID_PARAMETERS>(): input parameters are not valid
+    //     * Status::Error<MEM_ALLOC_FAILED>(): alloc memory failed
     Status init(TabletSchemaSPtr tablet_schema,
-                const std::vector<RowsetMetaSharedPtr>& delete_conditions, int64_t version);
+                const std::vector<RowsetMetaSharedPtr>& delete_preds, int64_t version);
 
-    bool empty() const { return _del_conds.empty(); }
-
-    // Release an instance of this class.
-    void finalize();
+    [[nodiscard]] bool empty() const { return _del_conds.empty(); }
 
     void get_delete_conditions_after_version(
             int64_t version, AndBlockColumnPredicate* and_block_column_predicate_ptr,
             std::unordered_map<int32_t, std::vector<const ColumnPredicate*>>*
-                    col_id_to_del_predicates) const;
+                    del_predicates_for_zone_map) const;
 
 private:
-    // Use regular expression to extract 'column_name', 'op' and 'operands'
-    bool _parse_condition(const std::string& condition_str, TCondition* condition);
+    template <typename SubPredType>
+        requires(std::is_same_v<SubPredType, DeleteSubPredicatePB> or
+                 std::is_same_v<SubPredType, std::string>)
+    Status _parse_column_pred(
+            TabletSchemaSPtr complete_schema, TabletSchemaSPtr delete_pred_related_schema,
+            const ::google::protobuf::RepeatedPtrField<SubPredType>& sub_pred_list,
+            DeleteConditions* delete_conditions);
 
     bool _is_inited = false;
     // DeleteConditions in _del_conds are in 'OR' relationship
     std::vector<DeleteConditions> _del_conds;
-    std::unique_ptr<MemPool> _predicate_mem_pool;
+    std::unique_ptr<vectorized::Arena> _predicate_arena;
 
     DISALLOW_COPY_AND_ASSIGN(DeleteHandler);
 };

@@ -25,7 +25,8 @@ suite("load_four_step") {
         |"AWS_ACCESS_KEY" = "${getS3AK()}",
         |"AWS_SECRET_KEY" = "${getS3SK()}",
         |"AWS_ENDPOINT" = "${getS3Endpoint()}",
-        |"AWS_REGION" = "${getS3Region()}")
+        |"AWS_REGION" = "${getS3Region()}",
+        |"provider" = "${getS3Provider()}")
         |PROPERTIES(
         |"exec_mem_limit" = "8589934592",
         |"load_parallelism" = "3")""".stripMargin()
@@ -48,6 +49,7 @@ suite("load_four_step") {
             // check load state
             while (true) {
                 def stateResult1 = sql "show load where Label = '${loadLabel1}'"
+                logger.info("load result ${stateResult1}");
                 def loadState1 = stateResult1[stateResult1.size() - 1][2].toString()
                 if ("CANCELLED".equalsIgnoreCase(loadState1)) {
                     throw new IllegalStateException("load ${loadLabel1} failed.")
@@ -65,6 +67,7 @@ suite("load_four_step") {
 
                     while(true){
                         def stateResult2 = sql "show load where Label = '${loadLabel2}'"
+                        logger.info("load result ${stateResult2}");
                         def loadState2 = stateResult2[stateResult2.size() - 1][2].toString()
                         if ("CANCELLED".equalsIgnoreCase(loadState2)) {
                             throw new IllegalStateException("load ${loadLabel2} failed.")
@@ -94,6 +97,7 @@ suite("load_four_step") {
 
                     while(true){
                         def stateResult3 = sql "show load where Label = '${loadLabel3}'"
+                        logger.info("load result ${stateResult3}");
                         def loadState3 = stateResult3[stateResult3.size() - 1][2].toString()
                         if ("CANCELLED".equalsIgnoreCase(loadState3)) {
                             throw new IllegalStateException("load ${loadLabel3} failed.")

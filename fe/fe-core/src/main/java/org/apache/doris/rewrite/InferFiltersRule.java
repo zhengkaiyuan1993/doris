@@ -310,7 +310,9 @@ public class InferFiltersRule implements ExprRewriteRule {
 
             if (row >= arrayMaxSize
                     || column >= arrayMaxSize) {
-                LOG.debug("Error row {} or column {}, but max size is {}.", row, column, arrayMaxSize);
+                if (LOG.isDebugEnabled()) {
+                    LOG.debug("Error row {} or column {}, but max size is {}.", row, column, arrayMaxSize);
+                }
                 needGenWarshallArray = false;
                 break;
             } else {
@@ -457,7 +459,8 @@ public class InferFiltersRule implements ExprRewriteRule {
                     || (joinOperator == JoinOperator.LEFT_SEMI_JOIN)
                     || (!needChange && joinOperator == JoinOperator.RIGHT_OUTER_JOIN)
                     || (needChange && (joinOperator == JoinOperator.LEFT_OUTER_JOIN
-                    || joinOperator == JoinOperator.LEFT_ANTI_JOIN))) {
+                    || joinOperator == JoinOperator.LEFT_ANTI_JOIN
+                    || joinOperator == JoinOperator.NULL_AWARE_LEFT_ANTI_JOIN))) {
                 ret = true;
             }
         } else if (clauseType == ExprRewriter.ClauseType.WHERE_CLAUSE) {
@@ -465,7 +468,8 @@ public class InferFiltersRule implements ExprRewriteRule {
                     || (joinOperator == JoinOperator.LEFT_SEMI_JOIN
                     || (needChange && joinOperator == JoinOperator.RIGHT_OUTER_JOIN))
                     || (!needChange && (joinOperator == JoinOperator.LEFT_OUTER_JOIN
-                    || joinOperator == JoinOperator.LEFT_ANTI_JOIN))) {
+                    || joinOperator == JoinOperator.LEFT_ANTI_JOIN
+                    || joinOperator == JoinOperator.NULL_AWARE_LEFT_ANTI_JOIN))) {
                 ret = true;
             }
         }

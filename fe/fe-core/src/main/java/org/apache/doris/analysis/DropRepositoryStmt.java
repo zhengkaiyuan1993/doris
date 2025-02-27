@@ -24,7 +24,7 @@ import org.apache.doris.common.UserException;
 import org.apache.doris.mysql.privilege.PrivPredicate;
 import org.apache.doris.qe.ConnectContext;
 
-public class DropRepositoryStmt extends DdlStmt {
+public class DropRepositoryStmt extends DdlStmt implements NotFallbackInParser {
 
     private String repoName;
 
@@ -41,7 +41,7 @@ public class DropRepositoryStmt extends DdlStmt {
         super.analyze(analyzer);
 
         // check auth
-        if (!Env.getCurrentEnv().getAuth().checkGlobalPriv(ConnectContext.get(), PrivPredicate.ADMIN)) {
+        if (!Env.getCurrentEnv().getAccessManager().checkGlobalPriv(ConnectContext.get(), PrivPredicate.ADMIN)) {
             ErrorReport.reportAnalysisException(ErrorCode.ERR_SPECIFIC_ACCESS_DENIED_ERROR, "ADMIN");
         }
     }
@@ -52,5 +52,10 @@ public class DropRepositoryStmt extends DdlStmt {
         sb.append("DROP ");
         sb.append("REPOSITORY `").append(repoName).append("`");
         return sb.toString();
+    }
+
+    @Override
+    public StmtType stmtType() {
+        return StmtType.DROP;
     }
 }

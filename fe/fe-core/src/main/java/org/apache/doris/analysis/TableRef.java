@@ -22,13 +22,19 @@ package org.apache.doris.analysis;
 
 import org.apache.doris.catalog.Env;
 import org.apache.doris.catalog.TableIf;
+import org.apache.doris.catalog.Type;
 import org.apache.doris.common.AnalysisException;
 import org.apache.doris.common.ErrorCode;
 import org.apache.doris.common.ErrorReport;
+import org.apache.doris.common.FeMetaVersion;
 import org.apache.doris.common.Pair;
 import org.apache.doris.common.UserException;
 import org.apache.doris.common.io.Text;
 import org.apache.doris.common.io.Writable;
+import org.apache.doris.common.util.TimeUtils;
+import org.apache.doris.datasource.hive.HMSExternalTable;
+import org.apache.doris.datasource.hudi.HudiUtils;
+import org.apache.doris.persist.gson.GsonUtils;
 import org.apache.doris.rewrite.ExprRewriter;
 import org.apache.doris.rewrite.ExprRewriter.ClauseType;
 
@@ -36,6 +42,7 @@ import com.google.common.base.Joiner;
 import com.google.common.base.Preconditions;
 import com.google.common.collect.Lists;
 import com.google.common.collect.Sets;
+import com.google.gson.annotations.SerializedName;
 import org.apache.commons.collections.CollectionUtils;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
@@ -47,6 +54,8 @@ import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
 import java.util.Set;
+import java.util.StringJoiner;
+import java.util.regex.Matcher;
 
 /**
  * Superclass of all table references, including references to views, base tables
@@ -78,6 +87,7 @@ import java.util.Set;
  */
 public class TableRef implements ParseNode, Writable {
     private static final Logger LOG = LogManager.getLogger(TableRef.class);
+    @SerializedName("n")
     protected TableName name;
     // Legal aliases of this table ref. Contains the explicit alias as its sole element if
     // there is one. Otherwise, contains the two implicit aliases. Implicit aliases are set
@@ -85,11 +95,18 @@ public class TableRef implements ParseNode, Writable {
     // analysis. By convention, for table refs with multiple implicit aliases, aliases_[0]
     // contains the fully-qualified implicit alias to ensure that aliases_[0] always
     // uniquely identifies this table ref regardless of whether it has an explicit alias.
+    @SerializedName("a")
     protected String[] aliases;
     protected List<Long> sampleTabletIds;
     // Indicates whether this table ref is given an explicit alias,
     protected boolean hasExplicitAlias;
     protected JoinOperator joinOp;
+    protected boolean isInBitmap;
+    // for mark join
+    protected boolean isMark;
+    // we must record mark tuple name for re-analyze
+    protected String markTupleName;
+
     protected List<String> usingColNames;
     protected ArrayList<LateralViewRef> lateralViewRefs;
     protected Expr onClause;
@@ -116,6 +133,7 @@ public class TableRef implements ParseNode, Writable {
     protected List<TupleId> correlatedTupleIds = Lists.newArrayList();
     // analysis output
     protected TupleDescriptor desc;
+    @SerializedName("p")
     private PartitionNames partitionNames = null;
     private ArrayList<String> joinHints;
     private ArrayList<String> sortHints;
@@ -125,6 +143,10 @@ public class TableRef implements ParseNode, Writable {
     private boolean isBroadcastJoin;
     private boolean isPartitionJoin;
     private String sortColumn = null;
+
+    private TableSnapshot tableSnapshot;
+
+    private TableScanParams scanParams;
 
     // END: Members that need to be reset()
     // ///////////////////////////////////////
@@ -150,6 +172,17 @@ public class TableRef implements ParseNode, Writable {
      */
     public TableRef(TableName name, String alias, PartitionNames partitionNames, ArrayList<Long> sampleTabletIds,
                     TableSample tableSample, ArrayList<String> commonHints) {
+        this(name, alias, partitionNames, sampleTabletIds, tableSample, commonHints, null);
+    }
+
+    public TableRef(TableName name, String alias, PartitionNames partitionNames, ArrayList<Long> sampleTabletIds,
+                    TableSample tableSample, ArrayList<String> commonHints, TableSnapshot tableSnapshot) {
+        this(name, alias, partitionNames, sampleTabletIds, tableSample, commonHints, tableSnapshot, null);
+    }
+
+    public TableRef(TableName name, String alias, PartitionNames partitionNames,
+                    ArrayList<Long> sampleTabletIds, TableSample tableSample, ArrayList<String> commonHints,
+                    TableSnapshot tableSnapshot, TableScanParams scanParams) {
         this.name = name;
         if (alias != null) {
             if (Env.isStoredTableNamesLowerCase()) {
@@ -164,6 +197,8 @@ public class TableRef implements ParseNode, Writable {
         this.sampleTabletIds = sampleTabletIds;
         this.tableSample = tableSample;
         this.commonHints = commonHints;
+        this.tableSnapshot = tableSnapshot;
+        this.scanParams = scanParams;
         isAnalyzed = false;
     }
 
@@ -174,6 +209,8 @@ public class TableRef implements ParseNode, Writable {
         aliases = other.aliases;
         hasExplicitAlias = other.hasExplicitAlias;
         joinOp = other.joinOp;
+        isMark = other.isMark;
+        markTupleName = other.markTupleName;
         // NOTE: joinHints and sortHints maybe changed after clone. so we new one List.
         joinHints =
                 (other.joinHints != null) ? Lists.newArrayList(other.joinHints) : null;
@@ -181,6 +218,8 @@ public class TableRef implements ParseNode, Writable {
                 (other.sortHints != null) ? Lists.newArrayList(other.sortHints) : null;
         onClause = (other.onClause != null) ? other.onClause.clone().reset() : null;
         partitionNames = (other.partitionNames != null) ? new PartitionNames(other.partitionNames) : null;
+        tableSnapshot = (other.tableSnapshot != null) ? new TableSnapshot(other.tableSnapshot) : null;
+        scanParams = other.scanParams;
         tableSample = (other.tableSample != null) ? new TableSample(other.tableSample) : null;
         commonHints = other.commonHints;
 
@@ -253,6 +292,31 @@ public class TableRef implements ParseNode, Writable {
         this.joinOp = op;
     }
 
+    public boolean isInBitmap() {
+        return isInBitmap;
+    }
+
+    public void setInBitmap(boolean inBitmap) {
+        isInBitmap = inBitmap;
+    }
+
+    public boolean isMark() {
+        return isMark;
+    }
+
+    public String getMarkTupleName() {
+        return markTupleName;
+    }
+
+    public void setMark(TupleDescriptor markTuple) {
+        this.isMark = markTuple != null;
+        if (isMark) {
+            this.markTupleName = markTuple.getAlias();
+        } else {
+            this.markTupleName = null;
+        }
+    }
+
     public Expr getOnClause() {
         return onClause;
     }
@@ -269,8 +333,24 @@ public class TableRef implements ParseNode, Writable {
         return sampleTabletIds;
     }
 
+    public ArrayList<String> getCommonHints() {
+        return commonHints;
+    }
+
     public TableSample getTableSample() {
         return tableSample;
+    }
+
+    public TableSnapshot getTableSnapshot() {
+        return tableSnapshot;
+    }
+
+    public Boolean haveDesc() {
+        return desc != null;
+    }
+
+    public TableScanParams getScanParams() {
+        return scanParams;
     }
 
     /**
@@ -414,9 +494,11 @@ public class TableRef implements ParseNode, Writable {
     }
 
     protected void analyzeSample() throws AnalysisException {
-        if ((sampleTabletIds != null || tableSample != null) && desc.getTable().getType() != TableIf.TableType.OLAP) {
+        if ((sampleTabletIds != null || tableSample != null)
+                && desc.getTable().getType() != TableIf.TableType.OLAP
+                && desc.getTable().getType() != TableIf.TableType.HMS_EXTERNAL_TABLE) {
             throw new AnalysisException("Sample table " + desc.getTable().getName()
-                + " type " + desc.getTable().getType() + " is not OLAP");
+                + " type " + desc.getTable().getType() + " is not supported");
         }
     }
 
@@ -467,6 +549,49 @@ public class TableRef implements ParseNode, Writable {
                 isForcePreAggOpened = true;
                 break;
             }
+        }
+    }
+
+    protected void analyzeTableSnapshot(Analyzer analyzer) throws AnalysisException {
+        if (tableSnapshot == null) {
+            return;
+        }
+        TableIf.TableType tableType = this.getTable().getType();
+        if (tableType == TableIf.TableType.HMS_EXTERNAL_TABLE) {
+            HMSExternalTable extTable = (HMSExternalTable) this.getTable();
+            switch (extTable.getDlaType()) {
+                case ICEBERG:
+                    if (tableSnapshot.getType() == TableSnapshot.VersionType.TIME) {
+                        String asOfTime = tableSnapshot.getTime();
+                        Matcher matcher = TimeUtils.DATETIME_FORMAT_REG.matcher(asOfTime);
+                        if (!matcher.matches()) {
+                            throw new AnalysisException("Invalid datetime string: " + asOfTime);
+                        }
+                    }
+                    break;
+                case HUDI:
+                    if (tableSnapshot.getType() == TableSnapshot.VersionType.VERSION) {
+                        throw new AnalysisException("Hudi table only supports timestamp as snapshot ID");
+                    }
+                    try {
+                        tableSnapshot.setTime(HudiUtils.formatQueryInstant(tableSnapshot.getTime()));
+                    } catch (Exception e) {
+                        throw new AnalysisException("Failed to parse hudi timestamp: " + e.getMessage(), e);
+                    }
+                    break;
+                default:
+                    ErrorReport.reportAnalysisException(ErrorCode.ERR_NONSUPPORT_TIME_TRAVEL_TABLE);
+            }
+        } else if (tableType == TableIf.TableType.ICEBERG_EXTERNAL_TABLE) {
+            if (tableSnapshot.getType() == TableSnapshot.VersionType.TIME) {
+                String asOfTime = tableSnapshot.getTime();
+                Matcher matcher = TimeUtils.DATETIME_FORMAT_REG.matcher(asOfTime);
+                if (!matcher.matches()) {
+                    throw new AnalysisException("Invalid datetime string: " + asOfTime);
+                }
+            }
+        } else {
+            ErrorReport.reportAnalysisException(ErrorCode.ERR_NONSUPPORT_TIME_TRAVEL_TABLE);
         }
     }
 
@@ -573,6 +698,9 @@ public class TableRef implements ParseNode, Writable {
             analyzer.setVisibleSemiJoinedTuple(semiJoinedTupleId);
             onClause.analyze(analyzer);
             analyzer.setVisibleSemiJoinedTuple(null);
+            if (!onClause.getType().isBoolean()) {
+                onClause = onClause.castTo(Type.BOOLEAN);
+            }
             onClause.checkReturnsBool("ON clause", true);
             if (onClause.contains(Expr.isAggregatePredicate())) {
                 throw new AnalysisException(
@@ -602,6 +730,12 @@ public class TableRef implements ParseNode, Writable {
         } else {
             // Indicate that this table ref has an empty ON-clause.
             analyzer.registerOnClauseConjuncts(Collections.<Expr>emptyList(), this);
+        }
+
+        if (lateralViewRefs != null) {
+            for (LateralViewRef lateralViewRef : lateralViewRefs) {
+                allTableRefIds.add(lateralViewRef.getId());
+            }
         }
     }
 
@@ -640,8 +774,10 @@ public class TableRef implements ParseNode, Writable {
                 return "FULL OUTER JOIN";
             case CROSS_JOIN:
                 return "CROSS JOIN";
+            case NULL_AWARE_LEFT_ANTI_JOIN:
+                return "NULL AWARE LEFT ANTI JOIN";
             default:
-                return "bad join op: " + joinOp.toString();
+                return "bad join op: " + joinOp;
         }
     }
 
@@ -667,6 +803,13 @@ public class TableRef implements ParseNode, Writable {
             for (LateralViewRef viewRef : lateralViewRefs) {
                 tblName += " " + viewRef.toSql();
             }
+        }
+        if (partitionNames != null) {
+            StringJoiner sj = new StringJoiner(",", "", " ");
+            for (String partName : partitionNames.getPartitionNames()) {
+                sj.add(partName);
+            }
+            return tblName + " PARTITION(" + sj.toString() + ")";
         }
         return tblName;
     }
@@ -782,6 +925,8 @@ public class TableRef implements ParseNode, Writable {
      */
     protected void setJoinAttrs(TableRef other) {
         this.joinOp = other.joinOp;
+        this.isMark = other.isMark;
+        this.markTupleName = other.markTupleName;
         this.joinHints = other.joinHints;
         // this.tableHints_ = other.tableHints_;
         this.onClause = other.onClause;
@@ -834,23 +979,20 @@ public class TableRef implements ParseNode, Writable {
 
     @Override
     public void write(DataOutput out) throws IOException {
-        name.write(out);
-        if (partitionNames == null) {
-            out.writeBoolean(false);
-        } else {
-            out.writeBoolean(true);
-            partitionNames.write(out);
-        }
+        Text.writeString(out, GsonUtils.GSON.toJson(this));
+    }
 
-        if (hasExplicitAlias()) {
-            out.writeBoolean(true);
-            Text.writeString(out, getExplicitAlias());
+    public static TableRef read(DataInput in) throws IOException {
+        if (Env.getCurrentEnvJournalVersion() < FeMetaVersion.VERSION_135) {
+            TableRef ref = new TableRef();
+            ref.readFields(in);
+            return ref;
         } else {
-            out.writeBoolean(false);
+            return GsonUtils.GSON.fromJson(Text.readString(in), TableRef.class);
         }
     }
 
-    public void readFields(DataInput in) throws IOException {
+    private void readFields(DataInput in) throws IOException {
         name = new TableName();
         name.readFields(in);
         if (in.readBoolean()) {
@@ -861,5 +1003,13 @@ public class TableRef implements ParseNode, Writable {
             String alias = Text.readString(in);
             aliases = new String[]{alias};
         }
+    }
+
+    public void setPartitionNames(PartitionNames partitionNames) {
+        this.partitionNames = partitionNames;
+    }
+
+    public void setName(TableName name) {
+        this.name = name;
     }
 }

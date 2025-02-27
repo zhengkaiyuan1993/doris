@@ -17,21 +17,33 @@
 
 #pragma once
 
+#include <cstddef>
 #include <memory>
 
 #include "common/status.h"
+#include "io/io_common.h"
 #include "olap/block_column_predicate.h"
 #include "olap/column_predicate.h"
 #include "olap/olap_common.h"
+#include "olap/rowset/segment_v2/row_ranges.h"
 #include "olap/tablet_schema.h"
+#include "runtime/runtime_state.h"
 #include "vec/core/block.h"
+#include "vec/exprs/vexpr.h"
 
 namespace doris {
 
 class RowCursor;
-class RowBlockV2;
 class Schema;
 class ColumnPredicate;
+
+namespace vectorized {
+struct IteratorRowRef;
+};
+
+namespace segment_v2 {
+struct SubstreamIterator;
+}
 
 class StorageReadOptions {
 public:
@@ -50,11 +62,11 @@ public:
                   include_upper(include_upper_) {}
 
         // the lower bound of the range, nullptr if not existed
-        const RowCursor* lower_key;
+        const RowCursor* lower_key = nullptr;
         // whether `lower_key` is included in the range
         bool include_lower;
         // the upper bound of the range, nullptr if not existed
-        const RowCursor* upper_key;
+        const RowCursor* upper_key = nullptr;
         // whether `upper_key` is included in the range
         bool include_upper;
     };
@@ -71,28 +83,52 @@ public:
     std::unordered_map<uint32_t, std::shared_ptr<roaring::Roaring>> delete_bitmap;
 
     std::shared_ptr<AndBlockColumnPredicate> delete_condition_predicates =
-            std::make_shared<AndBlockColumnPredicate>();
+            AndBlockColumnPredicate::create_shared();
     // reader's column predicate, nullptr if not existed
     // used to fiter rows in row block
     std::vector<ColumnPredicate*> column_predicates;
     std::unordered_map<int32_t, std::shared_ptr<AndBlockColumnPredicate>> col_id_to_predicates;
-    std::unordered_map<int32_t, std::vector<const ColumnPredicate*>> col_id_to_del_predicates;
+    std::unordered_map<int32_t, std::vector<const ColumnPredicate*>> del_predicates_for_zone_map;
     TPushAggOp::type push_down_agg_type_opt = TPushAggOp::NONE;
 
     // REQUIRED (null is not allowed)
     OlapReaderStatistics* stats = nullptr;
     bool use_page_cache = false;
-    int block_row_max = 4096;
+    int block_row_max = 4096 - 32; // see https://github.com/apache/doris/pull/11816
 
     TabletSchemaSPtr tablet_schema = nullptr;
+    bool enable_unique_key_merge_on_write = false;
     bool record_rowids = false;
+    std::vector<int> topn_filter_source_node_ids;
+    int topn_filter_target_node_id = -1;
     // used for special optimization for query : ORDER BY key DESC LIMIT n
     bool read_orderby_key_reverse = false;
     // columns for orderby keys
     std::vector<uint32_t>* read_orderby_key_columns = nullptr;
+    io::IOContext io_ctx;
+    vectorized::VExpr* remaining_vconjunct_root = nullptr;
+    std::vector<vectorized::VExprSPtr> remaining_conjunct_roots;
+    vectorized::VExprContextSPtrs common_expr_ctxs_push_down;
+    const std::set<int32_t>* output_columns = nullptr;
+    // runtime state
+    RuntimeState* runtime_state = nullptr;
+    RowsetId rowset_id;
+    Version version;
+    int64_t tablet_id = 0;
+    // slots that cast may be eliminated in storage layer
+    std::map<std::string, TypeDescriptor> target_cast_type_for_variants;
+    RowRanges row_ranges;
+    size_t topn_limit = 0;
 };
 
-// Used to read data in RowBlockV2 one by one
+struct CompactionSampleInfo {
+    int64_t bytes = 0;
+    int64_t rows = 0;
+    int64_t group_data_size;
+};
+
+class RowwiseIterator;
+using RowwiseIteratorUPtr = std::unique_ptr<RowwiseIterator>;
 class RowwiseIterator {
 public:
     RowwiseIterator() = default;
@@ -103,21 +139,30 @@ public:
     // Input options may contain scan range in which this scan.
     // Return Status::OK() if init successfully,
     // Return other error otherwise
-    virtual Status init(const StorageReadOptions& opts) = 0;
+    virtual Status init(const StorageReadOptions& opts) {
+        return Status::NotSupported("to be implemented");
+    }
+
+    virtual Status init(const StorageReadOptions& opts, CompactionSampleInfo* sample_info) {
+        return Status::NotSupported("to be implemented");
+    }
 
     // If there is any valid data, this function will load data
     // into input batch with Status::OK() returned
     // If there is no data to read, will return Status::EndOfFile.
     // If other error happens, other error code will be returned.
-    virtual Status next_batch(RowBlockV2* block) {
-        return Status::NotSupported("to be implemented");
-    }
-
     virtual Status next_batch(vectorized::Block* block) {
         return Status::NotSupported("to be implemented");
     }
 
     virtual Status next_block_view(vectorized::BlockView* block_view) {
+        return Status::NotSupported("to be implemented");
+    }
+
+    virtual Status next_row(vectorized::IteratorRowRef* ref) {
+        return Status::NotSupported("to be implemented");
+    }
+    virtual Status unique_key_next_row(vectorized::IteratorRowRef* ref) {
         return Status::NotSupported("to be implemented");
     }
 
@@ -136,6 +181,13 @@ public:
     // Return the data id such as segment id, used for keep the insert order when do
     // merge sort in priority queue
     virtual uint64_t data_id() const { return 0; }
+
+    virtual bool update_profile(RuntimeProfile* profile) { return false; }
+    // return rows merged count by iterator
+    virtual uint64_t merged_rows() const { return 0; }
+
+    // return if it's an empty iterator
+    virtual bool empty() const { return false; }
 };
 
 } // namespace doris

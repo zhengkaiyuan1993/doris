@@ -18,15 +18,34 @@
 // https://github.com/ClickHouse/ClickHouse/blob/master/src/Functions/Modulo.cpp
 // and modified by Doris
 
-#include <libdivide.h>
+#include <string.h>
 
-#include "common/status.h"
+#include <cmath>
+#include <memory>
+#include <utility>
+
 #include "runtime/decimalv2_value.h"
+#include "vec/columns/column_vector.h"
 #include "vec/core/types.h"
+#include "vec/data_types/number_traits.h"
 #include "vec/functions/function_binary_arithmetic.h"
 #include "vec/functions/simple_function_factory.h"
 
 namespace doris::vectorized {
+
+template <typename A, typename B>
+inline void throw_if_division_leads_to_FPE(A a, B b) {
+    // http://avva.livejournal.com/2548306.html
+    // (-9223372036854775808 % -1) will cause coredump directly, so check this case to throw exception, or maybe could return 0 as result
+    if constexpr (std::is_signed_v<A> && std::is_signed_v<B>) {
+        if (b == -1 && a == std::numeric_limits<A>::min()) {
+            throw Exception(ErrorCode::INVALID_ARGUMENT,
+                            "Division of minimal signed number by minus one is an undefined "
+                            "behavior, {} % {}. ",
+                            a, b);
+        }
+    }
+}
 
 template <typename A, typename B>
 struct ModuloImpl {
@@ -46,6 +65,7 @@ struct ModuloImpl {
                 if constexpr (std::is_floating_point_v<ResultType>) {
                     c[i] = std::fmod((double)a[i], (double)b);
                 } else {
+                    throw_if_division_leads_to_FPE(a[i], b);
                     c[i] = a[i] % b;
                 }
             }
@@ -60,6 +80,7 @@ struct ModuloImpl {
         if constexpr (std::is_floating_point_v<Result>) {
             return std::fmod((double)a, (double)b);
         } else {
+            throw_if_division_leads_to_FPE(a, b);
             return a % b;
         }
     }
@@ -89,6 +110,7 @@ struct PModuloImpl {
                 if constexpr (std::is_floating_point_v<ResultType>) {
                     c[i] = std::fmod(std::fmod((double)a[i], (double)b) + (double)b, double(b));
                 } else {
+                    throw_if_division_leads_to_FPE(a[i], b);
                     c[i] = (a[i] % b + b) % b;
                 }
             }
@@ -103,6 +125,7 @@ struct PModuloImpl {
         if constexpr (std::is_floating_point_v<Result>) {
             return std::fmod(std::fmod((double)a, (double)b) + (double)b, (double)b);
         } else {
+            throw_if_division_leads_to_FPE(a, b);
             return (a % b + b) % b;
         }
     }

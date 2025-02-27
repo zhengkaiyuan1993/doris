@@ -23,7 +23,7 @@ import org.apache.doris.analysis.FloatLiteral;
 import org.apache.doris.analysis.StringLiteral;
 import org.apache.doris.catalog.Type;
 
-import org.apache.commons.lang.StringUtils;
+import org.apache.commons.lang3.StringUtils;
 
 import java.math.BigDecimal;
 import java.util.ArrayList;
@@ -50,7 +50,7 @@ public class LiteralUtils {
             } else if (v instanceof DecimalLiteral) {
                 list.add(((DecimalLiteral) v).getValue().toPlainString());
             } else if (v instanceof StringLiteral) {
-                list.add("'" + v.getStringValue() + "'");
+                list.add("\"" + v.getStringValue() + "\"");
             } else if (v instanceof ArrayLiteral) {
                 list.add(getStringValue((ArrayLiteral) v));
             } else {

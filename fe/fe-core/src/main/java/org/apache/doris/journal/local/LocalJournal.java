@@ -19,6 +19,7 @@ package org.apache.doris.journal.local;
 
 import org.apache.doris.common.io.Writable;
 import org.apache.doris.journal.Journal;
+import org.apache.doris.journal.JournalBatch;
 import org.apache.doris.journal.JournalCursor;
 import org.apache.doris.journal.JournalEntity;
 import org.apache.doris.persist.EditLogFileOutputStream;
@@ -83,7 +84,7 @@ public class LocalJournal implements Journal {
         try {
             storage = new Storage(imageDir);
             if (journalId.get() == storage.getEditsSeq()) {
-                System.out.println("Does not need to roll!");
+                LOG.warn("Does not need to roll! journalId: {}, editsSeq: {}", journalId.get(), storage.getEditsSeq());
                 return;
             }
             if (outputStream != null) {
@@ -105,6 +106,11 @@ public class LocalJournal implements Journal {
 
     @Override
     public long getMinJournalId() {
+        return 0;
+    }
+
+    @Override
+    public long getJournalNum() {
         return 0;
     }
 
@@ -135,11 +141,22 @@ public class LocalJournal implements Journal {
     }
 
     @Override
-    public synchronized void write(short op, Writable writable) throws IOException {
+    public synchronized long write(JournalBatch batch) throws IOException {
+        List<JournalBatch.Entity> entities = batch.getJournalEntities();
+        for (JournalBatch.Entity entity : entities) {
+            outputStream.write(entity.getOpCode(), entity.getBinaryData());
+        }
+        outputStream.setReadyToFlush();
+        outputStream.flush();
+        return journalId.getAndAdd(entities.size());
+    }
+
+    @Override
+    public synchronized long write(short op, Writable writable) throws IOException {
         outputStream.write(op, writable);
         outputStream.setReadyToFlush();
         outputStream.flush();
-        journalId.incrementAndGet();
+        return journalId.incrementAndGet();
     }
 
     @Override
@@ -192,5 +209,10 @@ public class LocalJournal implements Journal {
     @Override
     public List<Long> getDatabaseNames() {
         throw new RuntimeException("Not Support");
+    }
+
+    @Override
+    public boolean exceedMaxJournalSize(short op, Writable writable) throws IOException  {
+        return false;
     }
 }

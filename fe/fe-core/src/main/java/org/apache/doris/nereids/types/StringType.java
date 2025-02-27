@@ -37,13 +37,8 @@ public class StringType extends CharacterType {
     }
 
     @Override
-    public boolean acceptsType(DataType other) {
-        return other instanceof StringType;
-    }
-
-    @Override
     public String simpleString() {
-        return "string";
+        return "text";
     }
 
     @Override

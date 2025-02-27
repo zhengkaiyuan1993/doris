@@ -18,6 +18,8 @@
 
 #include "util/time_lut.h"
 
+#include "vec/runtime/vdatetime_value.h"
+
 namespace doris {
 TimeLUTImpl::TimeLUTImpl() {
     init_time_lut();
@@ -47,7 +49,7 @@ uint8_t calc_week(uint16_t year, uint8_t month, uint8_t day, bool monday_first, 
     int days = 0;
     *to_year = year;
 
-    // Check wether the first days of this year belongs to last year
+    // Check weather the first days of this year belongs to last year
     if (month == 1 && day <= (7 - weekday_first_day)) {
         if (!week_year && ((first_weekday && weekday_first_day != 0) ||
                            (!first_weekday && weekday_first_day > 3))) {
@@ -85,15 +87,17 @@ uint32_t calc_days_in_year(uint32_t year) {
     return is_leap(year) ? 366 : 365;
 }
 
-bool is_leap(uint32_t year) {
-    return ((year % 4) == 0) && ((year % 100 != 0) || ((year % 400) == 0 && year));
-}
-
 uint8_t calc_weekday(uint64_t day_nr, bool is_sunday_first_day) {
     return (day_nr + 5L + (is_sunday_first_day ? 1L : 0L)) % 7;
 }
 
 uint32_t calc_daynr(uint16_t year, uint8_t month, uint8_t day) {
+    // date_day_offet_dict range from [1900-01-01, 2039-12-31]
+    if (date_day_offset_dict::can_speed_up_calc_daynr(year) &&
+        LIKELY(date_day_offset_dict::get_dict_init())) {
+        return date_day_offset_dict::get().daynr(year, month, day);
+    }
+
     uint32_t delsum = 0;
     int y = year;
 

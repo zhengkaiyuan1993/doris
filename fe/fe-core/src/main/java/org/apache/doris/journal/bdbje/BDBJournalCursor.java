@@ -17,6 +17,8 @@
 
 package org.apache.doris.journal.bdbje;
 
+import org.apache.doris.catalog.Env;
+import org.apache.doris.common.Pair;
 import org.apache.doris.journal.JournalCursor;
 import org.apache.doris.journal.JournalEntity;
 
@@ -45,7 +47,7 @@ public class BDBJournalCursor implements JournalCursor {
 
     public static BDBJournalCursor getJournalCursor(BDBEnvironment env, long fromKey, long toKey) {
         if (toKey < fromKey || fromKey < 0) {
-            System.out.println("Invalid key range!");
+            LOG.warn("Invalid key range! fromKey:{} toKey:{}", fromKey, toKey);
             return null;
         }
         BDBJournalCursor cursor = null;
@@ -87,10 +89,13 @@ public class BDBJournalCursor implements JournalCursor {
     }
 
     @Override
-    public JournalEntity next() {
-        JournalEntity ret = null;
+    public Pair<Long, JournalEntity> next() {
         if (currentKey > toKey) {
-            return ret;
+            return null;
+        }
+
+        if (Env.getCurrentEnv().getForceSkipJournalIds().contains(String.valueOf(currentKey))) {
+            return Pair.of(currentKey++, null);
         }
         Long key = currentKey;
         DatabaseEntry theKey = new DatabaseEntry();
@@ -109,15 +114,16 @@ public class BDBJournalCursor implements JournalCursor {
                     // Recreate the data String.
                     byte[] retData = theData.getData();
                     DataInputStream in = new DataInputStream(new ByteArrayInputStream(retData));
-                    ret = new JournalEntity();
+                    JournalEntity entity = new JournalEntity();
                     try {
-                        ret.readFields(in);
+                        entity.readFields(in);
+                        entity.setDataSize(retData.length);
                     } catch (Exception e) {
                         LOG.error("fail to read journal entity key={}, will exit", currentKey, e);
                         System.exit(-1);
                     }
                     currentKey++;
-                    return ret;
+                    return Pair.of(key, entity);
                 } else if (nextDbPositionIndex < dbNames.size() && currentKey == dbNames.get(nextDbPositionIndex)) {
                     database = environment.openDatabase(dbNames.get(nextDbPositionIndex).toString());
                     nextDbPositionIndex++;

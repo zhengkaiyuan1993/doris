@@ -42,7 +42,7 @@ public class DefaultValueExpr extends Expr {
     }
 
     @Override
-    public void finalizeImplForNereids() throws AnalysisException {
-
+    public boolean supportSerializable() {
+        return false;
     }
 }

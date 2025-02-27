@@ -19,9 +19,8 @@ package org.apache.doris.qe;
 
 import org.apache.doris.catalog.Env;
 import org.apache.doris.mysql.MysqlCapability;
-import org.apache.doris.mysql.MysqlChannel;
 import org.apache.doris.mysql.MysqlCommand;
-import org.apache.doris.mysql.privilege.PaloAuth;
+import org.apache.doris.mysql.privilege.Auth;
 import org.apache.doris.thrift.TUniqueId;
 
 import mockit.Expectations;
@@ -35,8 +34,6 @@ import java.util.List;
 
 public class ConnectContextTest {
     @Mocked
-    private MysqlChannel channel;
-    @Mocked
     private StmtExecutor executor;
     @Mocked
     private SocketChannel socketChannel;
@@ -45,34 +42,17 @@ public class ConnectContextTest {
     @Mocked
     private ConnectScheduler connectScheduler;
     @Mocked
-    private PaloAuth paloAuth;
+    private Auth auth;
     @Mocked
     private String qualifiedUser;
 
     @Before
     public void setUp() throws Exception {
-        new Expectations() {
-            {
-                channel.getRemoteHostPortString();
-                minTimes = 0;
-                result = "127.0.0.1:12345";
-
-                channel.close();
-                minTimes = 0;
-
-                channel.getRemoteIp();
-                minTimes = 0;
-                result = "192.168.1.1";
-
-                executor.cancel();
-                minTimes = 0;
-            }
-        };
     }
 
     @Test
     public void testNormal() {
-        ConnectContext ctx = new ConnectContext(socketChannel);
+        ConnectContext ctx = new ConnectContext();
 
         // State
         Assert.assertNotNull(ctx.getState());
@@ -87,22 +67,17 @@ public class ConnectContextTest {
         ctx.setKilled();
         Assert.assertTrue(ctx.isKilled());
 
-        // Current cluster
-        Assert.assertEquals("", ctx.getClusterName());
-        ctx.setCluster("testCluster");
-        Assert.assertEquals("testCluster", ctx.getClusterName());
-
         // Current db
         Assert.assertEquals("", ctx.getDatabase());
-        ctx.setDatabase("testCluster:testDb");
-        Assert.assertEquals("testCluster:testDb", ctx.getDatabase());
+        ctx.setDatabase("testDb");
+        Assert.assertEquals("testDb", ctx.getDatabase());
 
         // User
-        ctx.setQualifiedUser("testCluster:testUser");
-        Assert.assertEquals("testCluster:testUser", ctx.getQualifiedUser());
+        ctx.setQualifiedUser("testUser");
+        Assert.assertEquals("testUser", ctx.getQualifiedUser());
 
         // Serializer
-        Assert.assertNotNull(ctx.getSerializer());
+        Assert.assertNotNull(ctx.getMysqlChannel().getSerializer());
 
         // Session variable
         Assert.assertNotNull(ctx.getSessionVariable());
@@ -120,19 +95,25 @@ public class ConnectContextTest {
         ctx.setCommand(MysqlCommand.COM_PING);
         Assert.assertEquals(MysqlCommand.COM_PING, ctx.getCommand());
 
+        // LoginTime
+        ctx.loginTime = 1694002396223L;
+
         // Thread info
         Assert.assertNotNull(ctx.toThreadInfo(false));
-        List<String> row = ctx.toThreadInfo(false).toRow(1000);
-        Assert.assertEquals(9, row.size());
-        Assert.assertEquals("101", row.get(0));
-        Assert.assertEquals("testUser", row.get(1));
-        Assert.assertEquals("127.0.0.1:12345", row.get(2));
-        Assert.assertEquals("testCluster", row.get(3));
-        Assert.assertEquals("testDb", row.get(4));
-        Assert.assertEquals("Ping", row.get(5));
-        Assert.assertEquals("1", row.get(6));
-        Assert.assertEquals("", row.get(7));
-        Assert.assertEquals("", row.get(8));
+        List<String> row = ctx.toThreadInfo(false).toRow(101, 1000);
+        Assert.assertEquals(14, row.size());
+        Assert.assertEquals("Yes", row.get(0));
+        Assert.assertEquals("101", row.get(1));
+        Assert.assertEquals("testUser", row.get(2));
+        Assert.assertEquals("", row.get(3));
+        Assert.assertEquals("2023-09-06 20:13:16", row.get(4));
+        Assert.assertEquals("internal", row.get(5));
+        Assert.assertEquals("testDb", row.get(6));
+        Assert.assertEquals("Ping", row.get(7));
+        Assert.assertEquals("1", row.get(8));
+        Assert.assertEquals("OK", row.get(9));
+        Assert.assertEquals("", row.get(10));
+        Assert.assertEquals("", row.get(11));
 
         // Start time
         Assert.assertEquals(0, ctx.getStartTime());
@@ -154,27 +135,26 @@ public class ConnectContextTest {
 
     @Test
     public void testSleepTimeout() {
-        ConnectContext ctx = new ConnectContext(socketChannel);
+        ConnectContext ctx = new ConnectContext();
         ctx.setCommand(MysqlCommand.COM_SLEEP);
 
         // sleep no time out
         ctx.setStartTime();
         Assert.assertFalse(ctx.isKilled());
-        long now = ctx.getStartTime() + ctx.getSessionVariable().getWaitTimeoutS() * 1000 - 1;
+        long now = ctx.getStartTime() + ctx.getSessionVariable().getWaitTimeoutS() * 1000L - 1;
         ctx.checkTimeout(now);
         Assert.assertFalse(ctx.isKilled());
 
         // Timeout
         ctx.setStartTime();
-        now = ctx.getStartTime() + ctx.getSessionVariable().getWaitTimeoutS() * 1000 + 1;
+        now = ctx.getStartTime() + ctx.getSessionVariable().getWaitTimeoutS() * 1000L + 1;
         ctx.setExecutor(executor);
         ctx.checkTimeout(now);
         Assert.assertTrue(ctx.isKilled());
 
         // user query timeout
         ctx.setStartTime();
-        ctx.setUserQueryTimeout(1);
-        now = ctx.getStartTime() + paloAuth.getQueryTimeout(qualifiedUser) * 1000 + 1;
+        now = ctx.getStartTime() + auth.getQueryTimeout(qualifiedUser) * 1000L + 1;
         ctx.setExecutor(executor);
         ctx.checkTimeout(now);
         Assert.assertTrue(ctx.isKilled());
@@ -191,17 +171,19 @@ public class ConnectContextTest {
 
     @Test
     public void testOtherTimeout() {
-        ConnectContext ctx = new ConnectContext(socketChannel);
+        ConnectContext ctx = new ConnectContext();
         ctx.setCommand(MysqlCommand.COM_QUERY);
 
         // sleep no time out
         Assert.assertFalse(ctx.isKilled());
-        long now = ctx.getSessionVariable().getQueryTimeoutS() * 1000 - 1;
+        ctx.setExecutor(executor);
+        long now = ctx.getExecTimeout() * 1000L - 1;
         ctx.checkTimeout(now);
         Assert.assertFalse(ctx.isKilled());
 
         // Timeout
-        now = ctx.getSessionVariable().getQueryTimeoutS() * 1000 + 1;
+        ctx.setExecutor(executor);
+        now = ctx.getExecTimeout() * 1000L + 1;
         ctx.checkTimeout(now);
         Assert.assertFalse(ctx.isKilled());
 
@@ -215,10 +197,79 @@ public class ConnectContextTest {
 
     @Test
     public void testThreadLocal() {
-        ConnectContext ctx = new ConnectContext(socketChannel);
+        ConnectContext ctx = new ConnectContext();
         Assert.assertNull(ConnectContext.get());
         ctx.setThreadLocalInfo();
         Assert.assertNotNull(ConnectContext.get());
         Assert.assertEquals(ctx, ConnectContext.get());
+    }
+
+    @Test
+    public void testGetMaxExecMemByte() {
+        ConnectContext context = new ConnectContext();
+        context.setQualifiedUser("a");
+        context.setEnv(env);
+        long sessionValue = 2097153L;
+        long propertyValue = 2097154L;
+        // only session
+        context.getSessionVariable().setMaxExecMemByte(sessionValue);
+        long result = context.getMaxExecMemByte();
+        Assert.assertEquals(sessionValue, result);
+        // has property
+        new Expectations() {
+            {
+                auth.getExecMemLimit(anyString);
+                minTimes = 0;
+                result = propertyValue;
+            }
+        };
+        result = context.getMaxExecMemByte();
+        Assert.assertEquals(propertyValue, result);
+    }
+
+    @Test
+    public void testGetQueryTimeoutS() {
+        ConnectContext context = new ConnectContext();
+        context.setQualifiedUser("a");
+        context.setEnv(env);
+        int sessionValue = 1;
+        int propertyValue = 2;
+        // only session
+        context.getSessionVariable().setQueryTimeoutS(sessionValue);
+        long result = context.getQueryTimeoutS();
+        Assert.assertEquals(sessionValue, result);
+        // has property
+        new Expectations() {
+            {
+                auth.getQueryTimeout(anyString);
+                minTimes = 0;
+                result = propertyValue;
+            }
+        };
+        result = context.getQueryTimeoutS();
+        Assert.assertEquals(propertyValue, result);
+    }
+
+    @Test
+    public void testInsertQueryTimeoutS() {
+        ConnectContext context = new ConnectContext();
+        context.setQualifiedUser("a");
+        context.setEnv(env);
+        int sessionValue = 1;
+        int propertyValue = 2;
+        // only session
+        context.getSessionVariable().setInsertTimeoutS(sessionValue);
+        long result = context.getInsertTimeoutS();
+        Assert.assertEquals(sessionValue, result);
+        // has property
+        new Expectations() {
+            {
+                auth.getInsertTimeout(anyString);
+                minTimes = 0;
+                result = propertyValue;
+            }
+        };
+        result = context.getInsertTimeoutS();
+        Assert.assertEquals(propertyValue, result);
     }
 }

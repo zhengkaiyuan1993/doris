@@ -30,7 +30,7 @@ import com.google.common.collect.Lists;
 
 import java.util.List;
 
-public class AdminCancelRepairTableStmt extends DdlStmt {
+public class AdminCancelRepairTableStmt extends DdlStmt implements NotFallbackInParser {
 
     private TableRef tblRef;
     private List<String> partitions = Lists.newArrayList();
@@ -43,7 +43,7 @@ public class AdminCancelRepairTableStmt extends DdlStmt {
     public void analyze(Analyzer analyzer) throws UserException {
         super.analyze(analyzer);
         // check auth
-        if (!Env.getCurrentEnv().getAuth().checkGlobalPriv(ConnectContext.get(), PrivPredicate.ADMIN)) {
+        if (!Env.getCurrentEnv().getAccessManager().checkGlobalPriv(ConnectContext.get(), PrivPredicate.ADMIN)) {
             ErrorReport.reportAnalysisException(ErrorCode.ERR_SPECIFIC_ACCESS_DENIED_ERROR, "ADMIN");
         }
 

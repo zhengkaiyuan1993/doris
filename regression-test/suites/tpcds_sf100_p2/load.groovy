@@ -32,7 +32,8 @@ suite('load') {
         |"AWS_ACCESS_KEY" = "${getS3AK()}",
         |"AWS_SECRET_KEY" = "${getS3SK()}",
         |"AWS_ENDPOINT" = "${getS3Endpoint()}",
-        |"AWS_REGION" = "${getS3Region()}")
+        |"AWS_REGION" = "${getS3Region()}",
+        |"provider" = "${getS3Provider()}")
         |PROPERTIES(
         |"exec_mem_limit" = "8589934592",
         |"load_parallelism" = "3")""".stripMargin()
@@ -40,7 +41,7 @@ suite('load') {
     // set fe configuration
     sql "ADMIN SET FRONTEND CONFIG ('max_bytes_per_broker_scanner' = '161061273600')"
     
-    sql "set global exec_mem_limit=16G;"
+    sql "set exec_mem_limit=16G;"
 
     def uniqueID = Math.abs(UUID.randomUUID().hashCode()).toString()
     tables.each { table, rows ->
@@ -61,6 +62,7 @@ suite('load') {
             // check load state
             while (true) {
                 def stateResult = sql "show load where Label = '${loadLabel}'"
+                logger.info("load result ${stateResult}");
                 def loadState = stateResult[stateResult.size() - 1][2].toString()
                 if ('CANCELLED'.equalsIgnoreCase(loadState)) {
                     throw new IllegalStateException("load ${loadLabel} failed.")
@@ -72,5 +74,11 @@ suite('load') {
             rowCount = sql "select count(*) from ${table}"
         }
         assertEquals(rows, rowCount[0][0])
+    }
+
+    sleep(70000) // wait for row count report of the tables just loaded
+    tables.each { table, rows ->
+        sql """SET query_timeout = 1800"""
+        sql """ ANALYZE TABLE $table WITH SYNC """
     }
 }

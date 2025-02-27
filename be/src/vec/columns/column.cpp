@@ -20,18 +20,17 @@
 
 #include "vec/columns/column.h"
 
-#include <sstream>
-
+#include "util/simd/bits.h"
 #include "vec/columns/column_const.h"
 #include "vec/columns/column_nullable.h"
-#include "vec/core/field.h"
 #include "vec/core/sort_block.h"
+#include "vec/data_types/data_type.h"
 
 namespace doris::vectorized {
 
 std::string IColumn::dump_structure() const {
     std::stringstream res;
-    res << get_family_name() << "(size = " << size();
+    res << get_name() << "(size = " << size();
 
     ColumnCallback callback = [&](ColumnPtr& subcolumn) {
         res << ", " << subcolumn->dump_structure();

@@ -17,18 +17,25 @@
 
 #include "runtime/jsonb_value.h"
 
-#include <cstring>
+#include <fmt/format.h>
+
+#include <string_view>
 
 #include "util/jsonb_error.h"
+#include "util/jsonb_stream.h"
+#include "util/jsonb_utils.h"
+#include "util/jsonb_writer.h"
 
 namespace doris {
 
-Status JsonBinaryValue::from_json_string(const char* s, int length) {
+Status JsonBinaryValue::from_json_string(const char* s, size_t length) {
     JsonbErrType error = JsonbErrType::E_NONE;
     if (!parser.parse(s, length)) {
         error = parser.getErrorCode();
-        return Status::InvalidArgument("json parse error: {} for value: {}",
-                                       JsonbErrMsg::getErrMsg(error), std::string_view(s, length));
+        auto msg = fmt::format("json parse error: {} for value: {}", JsonbErrMsg::getErrMsg(error),
+                               std::string_view(s, length));
+        VLOG_DEBUG << msg;
+        return Status::InvalidArgument(msg);
     }
 
     ptr = parser.getWriter().getOutput()->getBuffer();
